@@ -4,7 +4,6 @@ import { getPreferenceHeatmap, type PreferenceHeatmapData, type TagWeight } from
 import { aiAssistantApi } from '../api/aiAssistant';
 import { tagToChinese } from '../utils/tagToChinese';
 
-const THEME_GRADIENT = 'linear-gradient(135deg, #D8CECF 0%, #91738B 100%)';
 const CATEGORY_COLORS: Record<string, string> = {
   genres: '#91738B',
   instruments: '#8B7765',
