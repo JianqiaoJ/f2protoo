@@ -1,0 +1,159 @@
+// 推荐API
+
+const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:3000';
+
+/** 推荐请求触发原因，用于后端日志 */
+export type RecommendTrigger =
+  | 'user_expressed_preference'  // 用户主动表达喜好
+  | 'user_dislike_remove'        // 用户表达讨厌并移除 tag
+  | 'preferences_updated'        // 用户偏好已更新（可能因收藏、评分、听歌时长等）
+  | 'playlist_finished';         // 当前播放列表播放完毕
+
+/** 用户明确不喜欢的 tag，带这些 tag 的歌曲不再推荐 */
+export interface ExcludedTags {
+  genres?: string[];
+  instruments?: string[];
+  moods?: string[];
+  themes?: string[];
+}
+
+export interface RecommendRequest {
+  username: string;
+  /** 系统 A/B，用于 DB 维度与 A/B 实验 */
+  systemType?: 'A' | 'B';
+  currentTrackId?: string;
+  explicitPreferences?: {
+    genres?: string[];
+    instruments?: string[];
+    moods?: string[];
+    themes?: string[];
+  };
+  /** 用户明确不喜欢时传入，推荐结果中不会包含带这些 tag 的歌曲 */
+  excludedTags?: ExcludedTags;
+  /** 用户表达厌恶时传入当前待播列表，后端返回过滤后的列表（去掉含厌恶 tag 的曲目）供前端插队拼接 */
+  currentPlaylist?: string[];
+  count?: number;
+  /** 触发原因，用于后端请求日志 */
+  trigger?: RecommendTrigger;
+}
+
+/** 后端返回的首曲完整信息，与 JamendoTrack 一致 */
+export interface FirstTrackFromApi {
+  id: string;
+  name: string;
+  artist_name: string;
+  album_name: string;
+  image: string;
+  audio: string;
+  duration: number;
+  releasedate: string;
+  tags?: { genres: string[]; instruments: string[]; moods: string[]; themes: string[] };
+}
+
+export interface RecommendResponse {
+  success: boolean;
+  recommendedTracks: string[];
+  recommendedScores?: number[];
+  count?: number;
+  firstTrack?: FirstTrackFromApi | null;
+  /** 前 N 首完整曲目详情，用于「下一首」直接播放无需再请求 Jamendo */
+  firstTracks?: FirstTrackFromApi[];
+  message?: string;
+}
+
+export interface RecommendResult {
+  recommendedTracks: string[];
+  recommendedScores?: number[];
+  firstTrack?: FirstTrackFromApi | null;
+  firstTracks?: FirstTrackFromApi[];
+  /** 仅当 trigger 为 user_dislike_remove 且传了 currentPlaylist 时返回：当前待播中不含厌恶 tag 的曲目，供插队后拼接 */
+  filteredPlaylist?: string[];
+}
+
+const RECOMMEND_TIMEOUT_MS = 25000;
+
+/**
+ * 获取推荐歌曲（含首曲详情时可直接用 firstTrack，减少一次前端请求 Jamendo）
+ */
+export const getRecommendations = async (
+  request: RecommendRequest
+): Promise<RecommendResult> => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), RECOMMEND_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/recommend`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (response.ok) {
+      const data: RecommendResponse & { filteredPlaylist?: string[] } = await response.json();
+      if (data.success && data.recommendedTracks) {
+        return {
+          recommendedTracks: data.recommendedTracks,
+          recommendedScores: data.recommendedScores,
+          firstTrack: data.firstTrack ?? undefined,
+          firstTracks: data.firstTracks ?? undefined,
+          filteredPlaylist: data.filteredPlaylist,
+        };
+      }
+    }
+    return { recommendedTracks: [] };
+  } catch (error: any) {
+    clearTimeout(timeoutId);
+    if (error?.name === 'AbortError') {
+      console.error('获取推荐超时:', RECOMMEND_TIMEOUT_MS, 'ms', API_BASE_URL);
+      throw new Error(`推荐请求超时(${RECOMMEND_TIMEOUT_MS}ms)，请检查后端是否启动: ${API_BASE_URL}`);
+    }
+    console.error('获取推荐失败:', error);
+    throw error;
+  }
+};
+
+/** 为什么推荐这首：单曲的推荐理由（内容分、行为分、匹配标签） */
+export interface RecommendWhyData {
+  contentScore: number;
+  behaviorScore: number;
+  finalScore: number;
+  matchedTags: { genres: string[]; instruments: string[]; moods: string[]; themes: string[] };
+  trackTags: { genres: string[]; instruments: string[]; moods: string[]; themes: string[] };
+}
+
+/** 可选：当前歌曲的标签，当 trackId 不在后端标签库时用于计算推荐理由 */
+export interface TrackTagsForWhy {
+  genres?: string[];
+  instruments?: string[];
+  moods?: string[];
+  themes?: string[];
+}
+
+export const getRecommendWhy = async (
+  username: string,
+  trackId: string,
+  trackTags?: TrackTagsForWhy | null
+): Promise<RecommendWhyData | null> => {
+  try {
+    const body: { username: string; trackId: string; trackTags?: TrackTagsForWhy } = { username, trackId };
+    if (trackTags && (trackTags.genres?.length || trackTags.instruments?.length || trackTags.moods?.length || trackTags.themes?.length)) {
+      body.trackTags = trackTags;
+    }
+    const response = await fetch(`${API_BASE_URL}/api/recommend/why`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      if (data.success && data.data) return data.data;
+    }
+    return null;
+  } catch (error) {
+    console.error('获取推荐理由失败:', error);
+    return null;
+  }
+};

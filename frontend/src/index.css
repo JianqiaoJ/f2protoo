@@ -1,0 +1,164 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 音量滑块样式 - 垂直方向 */
+.volume-slider-container {
+  width: 20px;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  padding: 4px;
+  margin-bottom: 4px;
+}
+
+.volume-slider-vertical {
+  width: 60px;
+  height: 4px;
+  border-radius: 2px;
+  appearance: none;
+  cursor: pointer;
+  transform: rotate(-90deg);
+  transform-origin: center;
+  position: absolute;
+}
+
+.volume-slider-vertical::-webkit-slider-thumb {
+  appearance: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: black;
+  cursor: pointer;
+}
+
+.volume-slider-vertical::-moz-range-thumb {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: black;
+  cursor: pointer;
+  border: none;
+}
+
+/* 进度条 - 可拖动 */
+.progress-bar-range {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+}
+
+.progress-bar-range::-webkit-slider-runnable-track {
+  width: 100%;
+  height: 6.4px; /* 原 8px，减细 20% */
+  border-radius: 9999px;
+  background: linear-gradient(to right, black 0%, black var(--progress-percent, 0%), #e5e7eb var(--progress-percent, 0%), #e5e7eb 100%);
+}
+
+.progress-bar-range::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: black;
+  cursor: pointer;
+  margin-top: -3.8px; /* 与轨道 6.4px 垂直居中 */
+}
+
+.progress-bar-range::-moz-range-track {
+  width: 100%;
+  height: 6.4px; /* 原 8px，减细 20% */
+  border-radius: 9999px;
+  background: linear-gradient(to right, black 0%, black var(--progress-percent, 0%), #e5e7eb var(--progress-percent, 0%), #e5e7eb 100%);
+}
+
+.progress-bar-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: black;
+  cursor: pointer;
+  border: none;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: linear-gradient(135deg, #FFE5D9 0%, #FFF8F0 100%);
+}
+
+#root {
+  width: 100%;
+  height: 100vh;
+}
+
+/* 唤起Seren按钮呼吸灯效果 */
+@keyframes breathe-glow {
+  0%, 100% {
+    text-shadow: 
+      0 0 5px rgba(216, 206, 207, 0.7),
+      0 0 8px rgba(216, 206, 207, 0.6),
+      0 0 10px rgba(145, 115, 139, 0.5),
+      0 0 12px rgba(145, 115, 139, 0.4);
+    opacity: 1;
+  }
+  50% {
+    text-shadow: 
+      0 0 8px rgba(216, 206, 207, 0.9),
+      0 0 12px rgba(216, 206, 207, 0.7),
+      0 0 15px rgba(145, 115, 139, 0.6),
+      0 0 18px rgba(145, 115, 139, 0.5);
+    opacity: 0.9;
+  }
+}
+
+.awaken-seren-button {
+  animation: breathe-glow 2s ease-in-out infinite;
+}
+
+/* 推荐解释气泡闪光效果 */
+@keyframes recommendation-glow {
+  0%, 100% {
+    box-shadow: 
+      0 0 5px rgba(216, 206, 207, 0.7),
+      0 0 8px rgba(216, 206, 207, 0.6),
+      0 0 10px rgba(145, 115, 139, 0.5),
+      0 0 12px rgba(145, 115, 139, 0.4);
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 
+      0 0 8px rgba(216, 206, 207, 0.9),
+      0 0 12px rgba(216, 206, 207, 0.7),
+      0 0 15px rgba(145, 115, 139, 0.6),
+      0 0 18px rgba(145, 115, 139, 0.5);
+    opacity: 0.9;
+  }
+}
+
+.recommendation-tip {
+  animation: recommendation-glow 2s ease-in-out infinite;
+}
+
+/* 累计播放满 20 分钟时计时器闪烁提醒 */
+@keyframes session-timer-flash {
+  0%, 100% {
+    opacity: 1;
+    color: rgb(234 88 12);
+  }
+  50% {
+    opacity: 0.5;
+    color: rgb(194 65 12);
+  }
+}
+
+.session-timer-flash {
+  animation: session-timer-flash 0.8s ease-in-out infinite;
+}

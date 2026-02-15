@@ -1,0 +1,20 @@
+# Arize Phoenix 可观测平台 - 用于观测和记录 LLM/模型日志与 trace
+# 文档: https://docs.arize.com/phoenix/self-hosting/deployment-options/docker
+
+services:
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: phoenix
+    ports:
+      - "6006:6006"   # Phoenix UI + OTLP HTTP
+      - "4317:4317"   # OTLP gRPC（供 SDK 上报 trace）
+    environment:
+      # 使用本地目录持久化 SQLite（可选，不设则仅内存）
+      - PHOENIX_WORKING_DIR=/mnt/data
+    volumes:
+      - phoenix_data:/mnt/data
+    restart: unless-stopped
+
+volumes:
+  phoenix_data:
+    driver: local
