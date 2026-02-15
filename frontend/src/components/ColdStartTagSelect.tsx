@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react';
 import { usePlayerStore } from '../store';
 import { jamendoApi } from '../api';
-import { saveUserPreferences } from '../api/preferences';
+import { saveUserPreferences, checkBackendHealth } from '../api/preferences';
 import { setPlaylist } from '../api/playlist';
 import { getRecommendations } from '../api/recommend';
 import { getCurrentUser } from '../utils/storage';
@@ -13,6 +13,16 @@ type TagCategory = 'genres' | 'instruments' | 'moods' | 'themes';
 interface SelectedTag {
   category: TagCategory;
   tag: string;
+}
+
+const DRAG_DATA_KEY = 'application/x-preference-index';
+
+function reorderSelected(selected: SelectedTag[], fromIndex: number, toIndex: number): SelectedTag[] {
+  if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= selected.length || toIndex >= selected.length) return selected;
+  const next = [...selected];
+  const [removed] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, removed);
+  return next;
 }
 
 interface ColdStartTagSelectProps {
@@ -53,6 +63,7 @@ export default function ColdStartTagSelect({ onComplete, onClose, initialSelecte
     moods: '',
     themes: '',
   });
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
   const addTag = (category: TagCategory, tag: string) => {
     if (selected.some((s) => s.category === category && s.tag === tag)) return;
@@ -61,6 +72,32 @@ export default function ColdStartTagSelect({ onComplete, onClose, initialSelecte
 
   const removeTag = (index: number) => {
     setSelected((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handlePreferenceDragStart = (e: React.DragEvent, index: number) => {
+    e.dataTransfer.setData(DRAG_DATA_KEY, String(index));
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', ''); // 避免部分浏览器用 text 触发原生行为
+  };
+
+  const handlePreferenceDragOver = (e: React.DragEvent, index: number) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDragOverIndex(index);
+  };
+
+  const handlePreferenceDrop = (e: React.DragEvent, toIndex: number) => {
+    e.preventDefault();
+    setDragOverIndex(null);
+    const raw = e.dataTransfer.getData(DRAG_DATA_KEY);
+    if (raw === '') return;
+    const fromIndex = parseInt(raw, 10);
+    if (Number.isNaN(fromIndex)) return;
+    setSelected((prev) => reorderSelected(prev, fromIndex, toIndex));
+  };
+
+  const handlePreferenceDragEnd = () => {
+    setDragOverIndex(null);
   };
 
   const setSearchFor = (cat: TagCategory, value: string) => {
@@ -93,11 +130,9 @@ export default function ColdStartTagSelect({ onComplete, onClose, initialSelecte
   };
 
   const handleComplete = async () => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ColdStartTagSelect.tsx:handleComplete:entry',message:'handleComplete invoked',data:{currentSystem,selectedCount:selected.length},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     const username = getCurrentUser();
     if (!username) {
+      setCompleteError('请先登录');
       setError('请先登录');
       return;
     }
@@ -108,12 +143,14 @@ export default function ColdStartTagSelect({ onComplete, onClose, initialSelecte
       themes: selected.filter((s) => s.category === 'themes').map((s) => s.tag),
     };
     if (prefs.genres.length === 0 && prefs.instruments.length === 0 && prefs.moods.length === 0 && prefs.themes.length === 0) {
+      setCompleteError('请至少选择一个偏好标签');
       setError('请至少选择一个偏好标签');
       return;
     }
     setLoading(true);
     setError(null);
     setCompleteError(null);
+    await new Promise((r) => setTimeout(r, 0));
 
     const OVERALL_TIMEOUT_MS = 50000;
     const TRACK_FETCH_TIMEOUT_MS = 8000;
@@ -122,11 +159,10 @@ export default function ColdStartTagSelect({ onComplete, onClose, initialSelecte
     const timeoutPromise = (ms: number) => new Promise<never>((_, reject) => setTimeout(() => reject(new Error('请求超时')), ms));
 
     const run = async () => {
+      console.log('[冷启动] 检查后端...');
+      await checkBackendHealth();
       console.log('[冷启动] 1/3 保存偏好...');
       await saveUserPreferences(username, prefs, { operation: 'first_login', systemType: currentSystem });
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ColdStartTagSelect.tsx:run:afterSave',message:'saveUserPreferences ok',data:{currentSystem},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       console.log('[冷启动] 2/3 偏好已保存，请求推荐...');
       usePlayerStore.getState().replaceUserPreferences(prefs);
       const result = await getRecommendations({
@@ -137,20 +173,14 @@ export default function ColdStartTagSelect({ onComplete, onClose, initialSelecte
         trigger: 'user_expressed_preference',
       });
       if (result.recommendedTracks?.length === 0) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ColdStartTagSelect.tsx:run:emptyResult',message:'getRecommendations returned empty',data:{currentSystem},timestamp:Date.now(),hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
         console.warn('[冷启动] 推荐接口返回空列表');
         const errMsg = '暂无推荐，请检查后端是否正常或稍后再试';
         setError(errMsg);
         setCompleteError(errMsg);
         return;
       }
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ColdStartTagSelect.tsx:run:afterRecommend',message:'getRecommendations ok',data:{currentSystem,resultLength:result.recommendedTracks.length},timestamp:Date.now(),hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
       console.log('[冷启动] 3/3 推荐已返回，共', result.recommendedTracks.length, '首');
-      usePlayerStore.getState().setRecommendedTrackIds(result.recommendedTracks, result.recommendedScores, result.firstTracks);
+      usePlayerStore.getState().setRecommendedTrackIds(result.recommendedTracks, result.recommendedScores, result.firstTracks, '冷启动选择标签后推荐');
       usePlayerStore.getState().setRecommendedTrackIndex(0);
       setPlaylist(username, result.recommendedTracks, currentSystem).catch(() => {});
       usePlayerStore.getState().syncLastRecommendationVersion?.();
@@ -182,9 +212,6 @@ export default function ColdStartTagSelect({ onComplete, onClose, initialSelecte
           }
         }
       }
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ColdStartTagSelect.tsx:run:beforeOnComplete',message:'about to call onComplete',data:{hasFirstTrack:!!firstTrack,currentSystem},timestamp:Date.now(),hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
       if (firstTrack) {
         usePlayerStore.getState().setCurrentTrack(firstTrack);
         usePlayerStore.getState().setIsPlaying(true);
@@ -200,15 +227,13 @@ export default function ColdStartTagSelect({ onComplete, onClose, initialSelecte
       await Promise.race([run(), timeoutPromise(OVERALL_TIMEOUT_MS)]);
     } catch (e) {
       const msg = e instanceof Error ? e.message : '保存偏好失败';
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ColdStartTagSelect.tsx:handleComplete:catch',message:'handleComplete error',data:{message:msg,currentSystem},timestamp:Date.now(),hypothesisId:'F'})}).catch(()=>{});
-      // #endregion
       console.error('[冷启动] 失败:', msg, e);
       // 失败时仍写入本地 store，便于重试时保持选择
       usePlayerStore.getState().replaceUserPreferences(prefs);
       const errMsg = msg === '请求超时' ? '请求超时，请检查网络或后端是否启动' : msg;
-      setError(errMsg);
       setCompleteError(errMsg);
+      const isBackendConnectionError = /连接后端|请先在 backend/i.test(errMsg);
+      if (!isBackendConnectionError) setError(errMsg);
     } finally {
       setLoading(false);
     }
@@ -216,6 +241,14 @@ export default function ColdStartTagSelect({ onComplete, onClose, initialSelecte
 
   return (
     <div className="p-4 bg-white/95 rounded-xl border border-gray-200 shadow-sm max-w-4xl mx-auto mt-4 w-full relative">
+      {loading && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-white/80" aria-busy="true">
+          <div className="text-center">
+            <div className="inline-block h-8 w-8 animate-spin rounded-full border-2 border-gray-300 border-t-[#91738B] mb-2" />
+            <p className="text-sm text-gray-700">正在保存偏好并获取推荐…</p>
+          </div>
+        </div>
+      )}
       <div className="flex items-start justify-between gap-4 mb-4">
         <div>
           <h3 className="text-base font-semibold text-gray-800 mb-1">选择你喜欢的标签（可多选）</h3>
@@ -291,22 +324,38 @@ export default function ColdStartTagSelect({ onComplete, onClose, initialSelecte
 
       {/* 我的偏好区域常驻 */}
       <div className="mt-3 pt-3 border-t border-gray-200">
-        <span className="text-sm font-medium text-gray-600">我的偏好</span>
+        <span className="text-sm font-medium text-gray-600">我的偏好（可拖动排序）</span>
         <div className="flex flex-wrap gap-1.5 mt-1 min-h-[2rem]">
           {selected.length > 0 ? (
             selected.map((s, i) => (
               <button
                 key={`${s.category}-${s.tag}-${i}`}
                 type="button"
-                onClick={() => removeTag(i)}
-                className="inline-flex items-center gap-0.5 px-2 py-0.5 text-xs rounded border transition-colors"
+                draggable
+                onDragStart={(e) => handlePreferenceDragStart(e, i)}
+                onDragOver={(e) => handlePreferenceDragOver(e, i)}
+                onDrop={(e) => handlePreferenceDrop(e, i)}
+                onDragEnd={handlePreferenceDragEnd}
+                onDragLeave={() => setDragOverIndex(null)}
+                className="inline-flex items-center gap-0.5 px-2 py-0.5 text-xs rounded border transition-colors cursor-grab active:cursor-grabbing"
                 style={{
                   borderColor: CATEGORY_COLORS[s.category],
                   color: CATEGORY_COLORS[s.category],
-                  backgroundColor: `${CATEGORY_COLORS[s.category]}14`,
+                  backgroundColor: dragOverIndex === i ? `${CATEGORY_COLORS[s.category]}28` : `${CATEGORY_COLORS[s.category]}14`,
+                  borderWidth: dragOverIndex === i ? 2 : 1,
                 }}
               >
-                {tagWithChinese(s.tag)} ×
+                <span className="select-none">{tagWithChinese(s.tag)}</span>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className="ml-0.5 opacity-80 hover:opacity-100"
+                  onClick={(e) => { e.stopPropagation(); e.preventDefault(); removeTag(i); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); removeTag(i); } }}
+                  aria-label="移除"
+                >
+                  ×
+                </span>
               </button>
             ))
           ) : (
@@ -332,7 +381,7 @@ export default function ColdStartTagSelect({ onComplete, onClose, initialSelecte
       <button
         type="button"
         onClick={handleComplete}
-        disabled={loading || selected.length === 0}
+        disabled={loading}
         className="mt-4 w-full py-[0.45rem] px-4 rounded-lg text-sm text-white font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
         style={{
           background: selected.length > 0 ? THEME_GRADIENT : '#ccc',

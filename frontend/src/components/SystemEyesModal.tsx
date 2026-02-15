@@ -3,13 +3,47 @@ import { getCurrentUser } from '../utils/storage';
 import { getPreferenceHeatmap, type PreferenceHeatmapData, type TagWeight } from '../api/preferenceHeatmap';
 import { aiAssistantApi } from '../api/aiAssistant';
 import { tagToChinese } from '../utils/tagToChinese';
+import { usePlayerStore } from '../store';
 
+/** 类别基础色，用 rgba 提高透明度（整体更透明） */
 const CATEGORY_COLORS: Record<string, string> = {
-  genres: '#91738B',
-  instruments: '#8B7765',
-  moods: '#788296',
-  themes: '#6B7B8C',
+  genres: 'rgba(145, 115, 139, 0.72)',
+  instruments: 'rgba(139, 119, 101, 0.72)',
+  moods: 'rgba(120, 130, 150, 0.72)',
+  themes: 'rgba(107, 123, 140, 0.72)',
 };
+
+/** Treemap 布局：权重越高面积越大。strip 按行填充，每行高度 ∝ 该行权重和 */
+function computeTreemapLayout(
+  items: { tag: string; weight: number; category: string }[],
+  width: number,
+  height: number
+): { item: typeof items[0]; x: number; y: number; w: number; h: number }[] {
+  if (items.length === 0) return [];
+  const totalWeight = items.reduce((s, i) => s + i.weight, 0);
+  if (totalWeight <= 0) return [];
+  const sorted = [...items].sort((a, b) => b.weight - a.weight);
+  const numRows = Math.max(1, Math.min(sorted.length, Math.round(Math.sqrt(sorted.length * 2))));
+  const chunkSize = Math.ceil(sorted.length / numRows);
+  const rows: typeof sorted[] = [];
+  for (let i = 0; i < sorted.length; i += chunkSize) {
+    rows.push(sorted.slice(i, i + chunkSize));
+  }
+  const result: { item: typeof items[0]; x: number; y: number; w: number; h: number }[] = [];
+  let currentY = 0;
+  for (const row of rows) {
+    const rowSum = row.reduce((s, i) => s + i.weight, 0);
+    const rowHeight = (rowSum / totalWeight) * height;
+    let currentX = 0;
+    for (const item of row) {
+      const w = (item.weight / rowSum) * width;
+      result.push({ item, x: currentX, y: currentY, w, h: rowHeight });
+      currentX += w;
+    }
+    currentY += rowHeight;
+  }
+  return result;
+}
 
 interface SystemEyesModalProps {
   onClose: () => void;
@@ -41,21 +75,17 @@ export default function SystemEyesModal({ onClose }: SystemEyesModalProps) {
   const [debugError, setDebugError] = useState<{ message: string; status?: number; name?: string } | null>(null);
   const explanationSetAt = useRef<number>(0);
 
+  const currentSystem = usePlayerStore((s) => s.currentSystem);
+
   useEffect(() => {
     const run = async () => {
       const currentUser = getCurrentUser();
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SystemEyesModal.tsx:run',message:'SystemEyes run start',data:{hasUser:!!currentUser},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
       if (!currentUser) {
-        setExplanation('请先登录以查看系统眼中的你。');
+        setExplanation('请先登录以查看系统眼中的你痴迷于…。');
         return;
       }
       try {
-        const data = await getPreferenceHeatmap({ username: currentUser });
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SystemEyesModal.tsx:afterHeatmap',message:'Heatmap OK',data:{hasData:!!data},timestamp:Date.now(),hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
+        const data = await getPreferenceHeatmap({ username: currentUser, system_type: currentSystem });
         setHeatmapData(data ?? null);
         const hasData = data && (
           (data.genres?.length ?? 0) + (data.instruments?.length ?? 0) +
@@ -63,22 +93,16 @@ export default function SystemEyesModal({ onClose }: SystemEyesModalProps) {
         ) > 0;
         if (hasData && data) {
           const text = await aiAssistantApi.generateHeatmapExplanation(data);
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SystemEyesModal.tsx:afterLLM',message:'LLM explanation OK',data:{textLen:text?.length},timestamp:Date.now(),hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
           setExplanation(text);
           explanationSetAt.current = Date.now();
         } else {
-          setExplanation('暂无足够的听歌记录。多与系统聊天、多听多评，让 Seren 更了解你哦～');
+          setExplanation('暂无足够的听歌记录。至少完成一次「听完并评分」或「收藏」后才会产生听歌记录；多听多评，让 Seren 更了解你哦～');
         }
       } catch (e: any) {
-        // #region agent log
         const errMsg = e?.message ?? String(e);
         const errStatus = e?.response?.status;
         const errName = e?.name;
         setDebugError({ message: errMsg, status: errStatus, name: errName });
-        fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SystemEyesModal.tsx:catch',message:'Load failed',data:{errMsg,errStatus,errName},timestamp:Date.now(),hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         console.error('系统眼中的你加载失败:', e);
         const isNetworkOrBackend =
           errStatus == null &&
@@ -91,11 +115,15 @@ export default function SystemEyesModal({ onClose }: SystemEyesModalProps) {
       }
     };
     run();
-  }, []);
+  }, [currentSystem]);
 
+  // 文字流式播放结束后 1 秒再显示 treemap（与 StreamText 的 charPerMs 一致）
+  const STREAM_CHAR_MS = 24;
   useEffect(() => {
     if (!explanation) return;
-    const timer = setTimeout(() => setShowTreemap(true), 2000);
+    const streamDurationMs = explanation.length * STREAM_CHAR_MS;
+    const delayMs = streamDurationMs + 1000;
+    const timer = setTimeout(() => setShowTreemap(true), delayMs);
     return () => clearTimeout(timer);
   }, [explanation]);
 
@@ -117,8 +145,8 @@ export default function SystemEyesModal({ onClose }: SystemEyesModalProps) {
         className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[85vh] overflow-y-auto flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="p-5 border-b border-gray-100 flex items-center justify-between shrink-0">
-          <h2 className="text-lg font-semibold text-gray-800">系统眼中的你</h2>
+        <div className="px-5 pt-4 pb-2 border-b border-gray-100 flex items-center justify-between shrink-0">
+          <h2 className="text-xs font-semibold text-gray-800">系统眼中的你痴迷于…</h2>
           <button
             type="button"
             onClick={onClose}
@@ -160,43 +188,51 @@ export default function SystemEyesModal({ onClose }: SystemEyesModalProps) {
             </div>
           </div>
 
-          {/* 2. Treemap：2s 后展开，弹开感 */}
-          {showTreemap && treemapItems.length > 0 && (
-            <div
-              className="rounded-lg overflow-hidden border border-gray-200"
-              style={{
-                animation: 'system-eyes-treemap-in 0.4s ease-out forwards',
-              }}
-            >
-              <style>{`
-                @keyframes system-eyes-treemap-in {
-                  from { opacity: 0; transform: scale(0.92); }
-                  to { opacity: 1; transform: scale(1); }
-                }
-              `}</style>
-              <div className="flex flex-wrap gap-0.5 p-2" style={{ minHeight: 120 }}>
-                {treemapItems.map((item, i) => {
-                  const color = CATEGORY_COLORS[item.category] || '#91738B';
-                  return (
-                    <div
-                      key={`${item.category}-${item.tag}-${i}`}
-                      className="rounded inline-flex items-center justify-center text-white text-xs font-medium truncate px-1.5 py-1.5 transition-transform hover:scale-105"
-                      style={{
-                        flex: `${item.weight} 1 0`,
-                        minWidth: 56,
-                        maxWidth: '100%',
-                        backgroundColor: color,
-                        boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
-                      }}
-                      title={`${tagToChinese(item.tag)} ${item.tag} (${item.weight > 0 ? '+' : ''}${item.weight.toFixed(1)})`}
-                    >
-                      {tagToChinese(item.tag) || item.tag}
-                    </div>
-                  );
-                })}
+          {/* 2. Treemap：权重越高面积越大；2s 后展开，窗口内弹开感；颜色更透明 */}
+          {showTreemap && treemapItems.length > 0 && (() => {
+            const layout = computeTreemapLayout(treemapItems, 100, 100);
+            return (
+              <div
+                className="rounded-lg overflow-hidden border border-gray-200 relative"
+                style={{
+                  height: 200,
+                  animation: 'system-eyes-treemap-pop 0.5s cubic-bezier(0.34, 1.4, 0.64, 1) forwards',
+                }}
+              >
+                <style>{`
+                  @keyframes system-eyes-treemap-pop {
+                    from { opacity: 0; transform: scale(0.88); }
+                    70% { opacity: 1; transform: scale(1.02); }
+                    to { opacity: 1; transform: scale(1); }
+                  }
+                `}</style>
+                <div className="absolute inset-0 w-full h-full p-0.5 box-border">
+                  {layout.map(({ item, x, y, w, h }, i) => {
+                    const color = CATEGORY_COLORS[item.category] || 'rgba(145, 115, 139, 0.72)';
+                    const zh = tagToChinese(item.tag);
+                    const labelText = zh && zh !== item.tag ? `${zh} ${item.tag}` : item.tag;
+                    return (
+                      <div
+                        key={`${item.category}-${item.tag}-${i}`}
+                        className="absolute rounded-none flex items-center justify-center text-white text-xs font-medium truncate transition-transform hover:scale-[1.03] border border-white/90 box-border"
+                        style={{
+                          left: `${x}%`,
+                          top: `${y}%`,
+                          width: `${w}%`,
+                          height: `${h}%`,
+                          backgroundColor: color,
+                          boxShadow: 'none',
+                        }}
+                        title={`${labelText} (${item.weight > 0 ? '+' : ''}${item.weight.toFixed(1)})`}
+                      >
+                        {labelText}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
           {error && explanation !== error && <p className="mt-2 text-sm text-red-500">{error}</p>}
           {debugError && (
             <p className="mt-2 text-xs text-gray-400 font-mono" title="调试用，确认根因后可移除">
@@ -207,7 +243,7 @@ export default function SystemEyesModal({ onClose }: SystemEyesModalProps) {
 
         {/* 3. 底部提示 */}
         <div className="p-4 border-t border-gray-100 text-center">
-          <p className="text-sm text-gray-500">多与系统聊天让 Seren 更了解你哦～</p>
+          <p className="text-xs text-gray-500">多与系统聊天让 Seren 更了解你哦～</p>
         </div>
       </div>
     </div>

@@ -9,7 +9,7 @@ import { getRecommendations, getRecommendWhy } from '../api/recommend';
 import { setPlaylist } from '../api/playlist';
 import { appendSystemLog } from '../api/logs';
 import { getPreferenceOperationLabel } from '../api/preferences';
-import PreferenceHeatmap from './PreferenceHeatmap';
+import { tagToChinese } from '../utils/tagToChinese';
 import SystemEyesModal from './SystemEyesModal';
 
 // 从localStorage加载消息历史（按用户隔离）
@@ -146,7 +146,6 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
   
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [showHeatmap, setShowHeatmap] = useState(false);
   const [showSystemEyesModal, setShowSystemEyesModal] = useState(false);
   const [preferenceRememberedTip, setPreferenceRememberedTip] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -291,7 +290,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                 });
                 appendSystemLog(`[推荐] 请求完成，共 ${recommendedTrackIds.length} 首`);
                 if (recommendedTrackIds.length > 0) {
-                  setRecommendedTrackIds(recommendedTrackIds, recommendedScores, firstTracks);
+                  setRecommendedTrackIds(recommendedTrackIds, recommendedScores, firstTracks, '用户表达喜好 / 冷启动推荐');
                   setRecommendedTrackIndex(1);
                   setPlaylist(username, recommendedTrackIds, currentSystem).catch(() => {});
                   syncLastRecommendationVersion(); // 避免点「推荐下一首」时被当成偏好更新又拉 10 首
@@ -301,54 +300,69 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                 }
                 
                 if (recommendedTrackIds.length > 0) {
-                  const recommendedTrackId = recommendedTrackIds[0];
                   const timestamp = new Date().toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-                  console.log(`🎵 [${timestamp}] 当前推荐歌曲 - track_id: ${recommendedTrackId}`);
-                  appendSystemLog(`[推荐] 当前推荐歌曲 - track_id: ${recommendedTrackId}`);
+                  let recommendedTrack = firstTrackFromApi ?? (Array.isArray(firstTracks) && firstTracks.length > 0 ? firstTracks[0] : null);
+                  if (!recommendedTrack) {
+                    for (let i = 0; i < Math.min(recommendedTrackIds.length, 5); i++) {
+                      try {
+                        recommendedTrack = await jamendoApi.getTrackById(recommendedTrackIds[i]);
+                        if (recommendedTrack) break;
+                      } catch {
+                        continue;
+                      }
+                    }
+                  }
+                  console.log(`🎵 [${timestamp}] 当前推荐歌曲 - track_id: ${recommendedTrack?.id ?? recommendedTrackIds[0]}`);
+                  appendSystemLog(`[推荐] 当前推荐歌曲 - track_id: ${recommendedTrack?.id ?? recommendedTrackIds[0]}`);
                   try {
-                    const recommendedTrack = firstTrackFromApi || await jamendoApi.getTrackById(recommendedTrackId);
+                    if (!recommendedTrack) throw new Error('首曲拉取失败');
                     setCurrentTrack(recommendedTrack);
                     setIsPlaying(true);
 
-                    // 构建「检测到的偏好」文案，用于冷启动成功回复
-                    const preferenceTexts: string[] = [];
+                    // 系统 B 冷启动：回复「识别到的用户偏好」+「推荐当前这首歌的理由」，语言热情、简洁、优美；展示完后收起 Seren
+                    const preferenceParts: string[] = [];
                     if (mappedTags.genres.length > 0) {
-                      preferenceTexts.push(`风格：${mappedTags.genres.join('、')}`);
+                      preferenceParts.push(`风格 ${mappedTags.genres.map(tagToChinese).join('、')}`);
                     }
                     if (mappedTags.instruments.length > 0) {
-                      preferenceTexts.push(`乐器：${mappedTags.instruments.join('、')}`);
+                      preferenceParts.push(`乐器 ${mappedTags.instruments.map(tagToChinese).join('、')}`);
                     }
-                    if (mappedTags.moods.length > 0) {
-                      preferenceTexts.push(`情绪：${mappedTags.moods.join('、')}`);
+                    const moodThemeParts: string[] = [];
+                    if (mappedTags.moods.length > 0) moodThemeParts.push(...mappedTags.moods.map(tagToChinese));
+                    if (mappedTags.themes.length > 0) moodThemeParts.push(...mappedTags.themes.map(tagToChinese));
+                    if (moodThemeParts.length > 0) {
+                      preferenceParts.push(`情绪·主题 ${[...new Set(moodThemeParts)].join('、')}`);
                     }
-                    if (mappedTags.themes.length > 0) {
-                      preferenceTexts.push(`主题：${mappedTags.themes.join('、')}`);
-                    }
-                    const detectedPreferenceIntro = preferenceTexts.length > 0
-                      ? `根据你刚才说的，我了解到你喜欢 ${preferenceTexts.join('，')}，所以为你推荐了当前这首歌。\n\n`
-                      : '';
+                    const recognizedSection = preferenceParts.length > 0
+                      ? `✨ 捕捉到你的喜好：${preferenceParts.join('；')}。\n\n为你选了这首《${recommendedTrack.name}》，推荐理由：\n\n`
+                      : `根据你的描述为你选了这首《${recommendedTrack.name}》～ 推荐理由：\n\n`;
 
-                    // 冷启动：回复「检测到的偏好」+「为什么推荐当前这首歌」
+                    // 生成推荐理由（热情、简洁、优美）
                     try {
                       const whyData = await getRecommendWhy(username, recommendedTrack.id, recommendedTrack.tags ?? undefined);
                       let explanationText: string;
                       if (whyData) {
-                        explanationText = await aiAssistantApi.generateWhyThisTrack(whyData, recommendedTrack.name, recommendedTrack.artist_name);
+                        explanationText = await aiAssistantApi.generateWhyThisTrack(whyData, recommendedTrack.name, recommendedTrack.artist_name, true);
                       } else {
                         explanationText = await aiAssistantApi.generateWhyThisTrackFallback(recommendedTrack.name, recommendedTrack.artist_name, recommendedTrack.tags ?? undefined);
                       }
-                      const fullContent = detectedPreferenceIntro + explanationText;
+                      const fullContent = recognizedSection + explanationText;
                       const systemReply: ChatMessage = { role: 'assistant', content: fullContent, fromSeren: true };
                       setMessages((prev) => {
                         const next = [...prev, systemReply];
                         saveMessagesToStorage(next);
                         return next;
                       });
+                      // 系统 B 冷启动：展示「识别到的偏好 + 推荐理由」后 1 秒自动收起小助手
+                      if (currentSystem === 'B') {
+                        const COLLAPSE_AFTER_MS = 1000;
+                        setTimeout(() => onFirstRecommendation?.(), COLLAPSE_AFTER_MS);
+                      }
                     } catch (explainErr) {
                       console.warn('冷启动推荐解释生成失败:', explainErr);
                       appendSystemLog(`[推荐] 冷启动推荐解释生成失败: ${explainErr instanceof Error ? explainErr.message : String(explainErr)}`);
-                      const fallbackWhy = `根据你的喜好为你推荐了《${recommendedTrack.name}》～希望你喜欢。`;
-                      const fullContent = detectedPreferenceIntro + fallbackWhy;
+                      const fallbackWhy = `这首很契合你刚说的口味，希望你喜欢～`;
+                      const fullContent = recognizedSection + fallbackWhy;
                       const fallbackReply: ChatMessage = {
                         role: 'assistant',
                         content: fullContent,
@@ -359,20 +373,19 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                         saveMessagesToStorage(next);
                         return next;
                       });
+                      if (currentSystem === 'B') {
+                        setTimeout(() => onFirstRecommendation?.(), 1000);
+                      }
                     }
 
                     showPreferenceRememberedTip();
-                    // 标记第一次推荐已完成，等待歌曲开始播放后再收起
-                    // 注意：这里需要在偏好保存之前检查，因为偏好保存后就不是首次登录了
                     const prefsBeforeSave = getUserPreferences();
-                    const isFirstLoginBeforeSave = prefsBeforeSave.genres.length === 0 && 
-                                                  prefsBeforeSave.instruments.length === 0 && 
-                                                  prefsBeforeSave.moods.length === 0 && 
+                    const isFirstLoginBeforeSave = prefsBeforeSave.genres.length === 0 &&
+                                                  prefsBeforeSave.instruments.length === 0 &&
+                                                  prefsBeforeSave.moods.length === 0 &&
                                                   prefsBeforeSave.themes.length === 0;
-                    
                     if (isFirstLoginBeforeSave && !hasTriggeredFirstRecommendationRef.current) {
                       hasTriggeredFirstRecommendationRef.current = true;
-                      // 不在这里收起，等待歌曲开始播放后再通过useEffect触发收起
                     }
                   } catch (trackError) {
                     console.error('Failed to load recommended track:', trackError);
@@ -422,7 +435,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
         try {
           // 先提取用户输入中的偏好关键词
           const extractedPrefs = await aiAssistantApi.extractPreferences(userInput);
-          
+
           // 检查是否有提取到偏好
           const hasExtractedPrefs = 
             extractedPrefs.genres.length > 0 ||
@@ -434,7 +447,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
             const availableTags = getReportDistinctTags();
             // 将提取的偏好映射到报告中的 distinct tags（不得编造）
             const mappedTags = await aiAssistantApi.mapUserInputToTags(userInput, availableTags);
-            
+
             // 检查映射后是否有有效的标签
             const hasMappedTags = 
               mappedTags.genres.length > 0 ||
@@ -446,11 +459,43 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
               // 记录映射后的标签（用于调试）
               console.group('🎵 用户偏好映射结果');
               console.log('用户输入:', userInput);
-              console.log('映射后的标签:', mappedTags);
-              
+              console.log('映射后的标签:', mappedTags, 'isDislike:', extractedPrefs.isDislike);
+
+              // 用户表达不喜欢：立即从偏好中移除该风格/特征，更新 DB（user_preferences + user_preference_updates），并重新请求推荐、立刻更新待播列表
+              if (extractedPrefs.isDislike) {
+                const removals: { type: 'genres' | 'instruments' | 'moods' | 'themes'; items: string[] }[] = [];
+                if (mappedTags.genres.length > 0) removals.push({ type: 'genres', items: mappedTags.genres });
+                if (mappedTags.instruments.length > 0) removals.push({ type: 'instruments', items: mappedTags.instruments });
+                if (mappedTags.moods.length > 0) removals.push({ type: 'moods', items: mappedTags.moods });
+                if (mappedTags.themes.length > 0) removals.push({ type: 'themes', items: mappedTags.themes });
+                if (removals.length > 0) {
+                  await removeUserPreferenceBatch(removals, { operation: 'dislike_remove', conversationContent: userInput });
+                  const parts: string[] = [];
+                  if (mappedTags.genres.length > 0) parts.push(mappedTags.genres.map(tagToChinese).join('、'));
+                  if (mappedTags.instruments.length > 0) parts.push(mappedTags.instruments.map(tagToChinese).join('、'));
+                  if (mappedTags.moods.length > 0) parts.push(mappedTags.moods.map(tagToChinese).join('、'));
+                  if (mappedTags.themes.length > 0) parts.push(mappedTags.themes.map(tagToChinese).join('、'));
+                  const removedText = parts.join('，');
+                  const dislikeReply: ChatMessage = {
+                    role: 'assistant',
+                    content: `已从你的偏好中移除：${removedText}，并已重新拉取推荐、更新待播列表，之后不会再推荐带这些风格的歌啦～`,
+                    fromSeren: true,
+                  };
+                  setMessages((prev) => {
+                    const next = [...prev, dislikeReply];
+                    saveMessagesToStorage(next);
+                    return next;
+                  });
+                  appendSystemLog(`[用户偏好] 已移除不喜欢: ${removedText}，已更新 DB 并刷新推荐列表`);
+                }
+                console.groupEnd();
+                setIsLoading(false);
+                return;
+              }
+
               // 获取当前用户偏好
               const currentPrefs = getUserPreferences();
-              
+
               // 检测偏好冲突
               const conflictResult = await aiAssistantApi.detectPreferenceConflict(
                 userInput,
@@ -541,7 +586,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                   });
                   appendSystemLog(`[推荐] 请求完成，共 ${newRecommendations.length} 首`);
                   if (newRecommendations.length > 0) {
-                    setRecommendedTrackIds(newRecommendations, newScores, newFirstTracks);
+                    setRecommendedTrackIds(newRecommendations, newScores, newFirstTracks, '用户偏好已更新');
                     setRecommendedTrackIndex(1);
                     setPlaylist(username, newRecommendations, currentSystem).catch(() => {});
                     const firstTrack = firstTrackFromApi || await jamendoApi.getTrackById(newRecommendations[0]);
@@ -585,13 +630,13 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
         }
       }
 
-      // 1) 若上一条是「是否想查看系统学习到的你的偏好」且用户回复肯定，则打开偏好热力图（treemap）
+      // 1) 若上一条是「是否想查看系统学习到的你的偏好」且用户回复肯定，则打开系统眼中的你（treemap）
       const lastBeforeUser = messages.length > 0 ? messages[messages.length - 1] : null;
-      const wasHeatmapOffer = lastBeforeUser?.role === 'assistant' && typeof lastBeforeUser.content === 'string' && lastBeforeUser.content.includes('是否想查看系统学习到的你的偏好');
+      const wasPrefOffer = lastBeforeUser?.role === 'assistant' && typeof lastBeforeUser.content === 'string' && lastBeforeUser.content.includes('是否想查看系统学习到的你的偏好');
       const positiveReply = /^(是|想|要|可以|好的|打开|看看|想看|想看下|想看一下|展示|显示|看一下|看看我的偏好|想看我的偏好)$/i.test(userInput.trim()) || /^好[的]?$/i.test(userInput.trim());
-      if (wasHeatmapOffer && positiveReply) {
-        setShowHeatmap(true);
-        const okMsg: ChatMessage = { role: 'assistant', content: '好的，正在为你打开偏好热力图～', fromSeren: true };
+      if (wasPrefOffer && positiveReply) {
+        setShowSystemEyesModal(true);
+        const okMsg: ChatMessage = { role: 'assistant', content: '好的，正在为你打开系统眼中的你痴迷于…～', fromSeren: true };
         setMessages((prev) => {
           const next = [...prev, okMsg];
           saveMessagesToStorage(next);
@@ -601,13 +646,13 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
         return;
       }
 
-      // 2) 用户问「怎么推荐的」等与推荐模型/算法相关的问题：查算法文档生成回答，并主动询问是否查看偏好热力图
+      // 2) 用户问「怎么推荐的」等与推荐模型/算法相关的问题：查算法文档生成回答，并主动询问是否查看偏好
       const algorithmKeywords = ['怎么推荐', '如何推荐', '推荐歌曲', '推荐算法', '推荐原理', '推荐模型', '你是怎么推荐的', '推荐机制', '推荐逻辑', '怎么给我推荐', '如何给我推荐'];
       const isAskingAlgorithm = algorithmKeywords.some((k) => userInput.toLowerCase().includes(k.toLowerCase()));
       if (isAskingAlgorithm) {
         const docContent = await aiAssistantApi.getRecommendationAlgorithmDoc();
         const answer = await aiAssistantApi.generateAnswerFromAlgorithmDoc(docContent, userInput);
-        const offerText = '是否想查看系统学习到的你的偏好？回复「是」或「想」即可打开偏好热力图。';
+        const offerText = '是否想查看系统学习到的你的偏好？回复「是」或「想」即可打开。';
         const answerMsg: ChatMessage = { role: 'assistant', content: answer, fromSeren: true };
         const offerMsg: ChatMessage = { role: 'assistant', content: offerText, fromSeren: true };
         setMessages((prev) => {
@@ -620,14 +665,80 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
         return;
       }
 
-      // 3) 检测用户是否询问偏好热力图（直接打开）
-      const preferenceKeywords = ['我的偏好', '偏好热力图', '我的喜好', '偏好是什么', '偏好情况', '偏好分析', '我的音乐偏好', '听歌偏好'];
+      // 2.5) 用户表达「重新推荐」「换一批」等不满：立刻调用推荐服务重新推荐并更新待播列表
+      const rerecommendKeywords = ['重新推荐', '换一批', '再推荐', '换一些', '重新推', '换一批歌', '不想听这些', '换歌', '给我换', '换一首', '不满意', '不想要这些', '换别的'];
+      const isRerecommendRequest = rerecommendKeywords.some(kw => userInput.includes(kw));
+      if (isRerecommendRequest) {
+        const username = getCurrentUser();
+        if (!username) {
+          setMessages((prev) => {
+            const next: ChatMessage[] = [...prev, { role: 'assistant', content: '请先登录后再试。', fromSeren: true }];
+            saveMessagesToStorage(next);
+            return next;
+          });
+          setIsLoading(false);
+          return;
+        }
+        try {
+          appendSystemLog('[推荐] 用户请求重新推荐，正在请求推荐接口...');
+          const prefs = getUserPreferences();
+          const { recommendedTracks: newIds, recommendedScores: newScores, firstTrack: firstFromApi, firstTracks: newFirstTracks } = await getRecommendations({
+            username,
+            systemType: currentSystem,
+            explicitPreferences: prefs,
+            count: 10,
+            trigger: 'user_request_rerecommend',
+          });
+          appendSystemLog(`[推荐] 重新推荐请求完成，共 ${newIds.length} 首`);
+          if (newIds.length === 0) {
+            setMessages((prev) => {
+              const next: ChatMessage[] = [...prev, { role: 'assistant', content: '暂时没有更多推荐，可以试试说说你喜欢的风格～', fromSeren: true }];
+              saveMessagesToStorage(next);
+              return next;
+            });
+          } else {
+            setRecommendedTrackIds(newIds, newScores ?? undefined, newFirstTracks, '用户请求重新推荐');
+            setRecommendedTrackIndex(0);
+            setPlaylist(username, newIds, currentSystem).catch(() => {});
+            syncLastRecommendationVersion();
+            const firstTrack = firstFromApi ?? newFirstTracks?.[0] ?? null;
+            if (firstTrack) {
+              setCurrentTrack(firstTrack);
+              setIsPlaying(true);
+            } else {
+              const fallback = await jamendoApi.getTrackById(newIds[0]).catch(() => null);
+              if (fallback) {
+                setCurrentTrack(fallback);
+                setIsPlaying(true);
+              }
+            }
+            setMessages((prev) => {
+              const next: ChatMessage[] = [...prev, { role: 'assistant', content: '已重新推荐，请听新歌～', fromSeren: true }];
+              saveMessagesToStorage(next);
+              return next;
+            });
+          }
+        } catch (err) {
+          console.warn('重新推荐失败:', err);
+          appendSystemLog(`[推荐] 重新推荐失败: ${err instanceof Error ? err.message : String(err)}`);
+          setMessages((prev) => {
+            const next: ChatMessage[] = [...prev, { role: 'assistant', content: '重新推荐时出错了，请稍后再试。', fromSeren: true }];
+            saveMessagesToStorage(next);
+            return next;
+          });
+        }
+        setIsLoading(false);
+        return;
+      }
+
+      // 3) 检测用户是否询问偏好（直接打开系统眼中的你 treemap）
+      const preferenceKeywords = ['我的偏好', '我的喜好', '偏好是什么', '偏好情况', '偏好分析', '我的音乐偏好', '听歌偏好'];
       const isAskingPreference = preferenceKeywords.some(keyword => 
         userInput.toLowerCase().includes(keyword.toLowerCase())
       );
       
       if (isAskingPreference) {
-        setShowHeatmap(true);
+        setShowSystemEyesModal(true);
         setIsLoading(false);
         return;
       }
@@ -748,7 +859,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
   };
 
   return (
-    <div className="w-full h-full flex flex-col bg-gray-100 border-r border-gray-200 relative" style={{ borderRightWidth: '0.5px' }}>
+    <div className="w-full h-full min-h-0 flex flex-col bg-gray-100 border-r border-gray-200 relative" style={{ borderRightWidth: '0.5px' }}>
       {/* Toggle Button - Floating on the right */}
       {onToggleAssistant && (
         <button
@@ -768,18 +879,11 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
         </button>
       )}
       
-      {/* Preference Heatmap Overlay */}
-      {showHeatmap && (
-        <div className="absolute inset-0 z-50 bg-white bg-opacity-95 flex items-center justify-center p-8">
-          <PreferenceHeatmap onClose={() => setShowHeatmap(false)} />
-        </div>
-      )}
-
-      {/* 系统眼中的你 弹窗 */}
+      {/* 系统眼中的你（偏好 treemap）弹窗 */}
       {showSystemEyesModal && <SystemEyesModal onClose={() => setShowSystemEyesModal(false)} />}
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto pt-8 px-4 pb-4 space-y-4 bg-gray-50">
+      {/* Messages - min-h-0 让 flex 子项可收缩，才能出现滚动条并支持往上滑 */}
+      <div className="flex-1 min-h-0 overflow-y-auto pt-8 px-4 pb-4 space-y-4 bg-gray-50">
         {messages.length === 0 ? (
           <div className="flex items-center justify-center h-full text-gray-400">
             <p>暂无消息</p>
@@ -890,14 +994,14 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                             
                             // 更新用户偏好
                             if (isLowRating) {
-                              // 用户主动表达讨厌：直接删掉当前歌曲的 tag，重新请求推荐并替换播放列表
+                              // 用户主动表达讨厌：立即从偏好中移除该歌的 tag，更新 DB（user_preferences + user_preference_updates），重新请求推荐并立刻更新待播列表
                               const removals: { type: 'genres' | 'instruments' | 'moods' | 'themes'; items: string[] }[] = [];
                               if (tagsToUpdate.genres.length > 0) removals.push({ type: 'genres', items: tagsToUpdate.genres });
                               if (tagsToUpdate.instruments.length > 0) removals.push({ type: 'instruments', items: tagsToUpdate.instruments });
                               if (tagsToUpdate.moods.length > 0) removals.push({ type: 'moods', items: tagsToUpdate.moods });
                               if (tagsToUpdate.themes.length > 0) removals.push({ type: 'themes', items: tagsToUpdate.themes });
                               if (removals.length > 0) {
-                                await removeUserPreferenceBatch(removals, { operation: 'dislike_remove' });
+                                await removeUserPreferenceBatch(removals, { operation: 'dislike_remove', conversationContent: '评分反馈：不喜欢' });
                                 console.log('已移除讨厌的 tag 并替换播放列表:', tagsToUpdate);
                               }
                             } else {
@@ -1017,7 +1121,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                       ))}
                     </div>
                   ) : transientButtonTip?.messageIndex === index ? (
-                    <div className="text-sm text-gray-500 self-start py-1">
+                    <div className="text-[11px] text-gray-500 self-start py-1">
                       {transientButtonTip.text}
                     </div>
                   ) : null}
@@ -1113,7 +1217,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
             style={{ background: 'linear-gradient(135deg, #D8CECF 0%, #91738B 100%)' }}
           >
             <span className="block px-3 py-1.5 text-xs font-medium rounded-[calc(0.5rem-1px)] bg-white text-gray-900">
-              系统眼中的你
+              系统眼中的你痴迷于…
             </span>
           </button>
         </div>

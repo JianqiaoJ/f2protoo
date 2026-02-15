@@ -7,7 +7,9 @@ export type RecommendTrigger =
   | 'user_expressed_preference'  // 用户主动表达喜好
   | 'user_dislike_remove'        // 用户表达讨厌并移除 tag
   | 'preferences_updated'        // 用户偏好已更新（可能因收藏、评分、听歌时长等）
-  | 'playlist_finished';         // 当前播放列表播放完毕
+  | 'preload_next_batch'         // 待播列表剩余不多，预拉下一批（未播完）
+  | 'playlist_finished'          // 当前播放列表播放完毕
+  | 'user_request_rerecommend';  // 用户说重新推荐/换一批等，立刻重新推荐
 
 /** 用户明确不喜欢的 tag，带这些 tag 的歌曲不再推荐 */
 export interface ExcludedTags {
@@ -35,6 +37,8 @@ export interface RecommendRequest {
   count?: number;
   /** 触发原因，用于后端请求日志 */
   trigger?: RecommendTrigger;
+  /** 当 trigger 为 preferences_updated 时可选传入：偏好更新原因（如 favorite/rating_confirm），后端日志会明确展示为 收藏/评分高/听歌完播 等 */
+  preferenceUpdateReason?: string;
 }
 
 /** 后端返回的首曲完整信息，与 JamendoTrack 一致 */

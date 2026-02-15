@@ -196,11 +196,13 @@ function App() {
     loadTracks();
   }, [trackIds.length, currentTrackIndex, setTrackIds, setCurrentTrack, setLoading, setError]);
 
-  // 每次浏览器刷新：已登录时重新请求一次推荐，更新待播列表
+  // 每次浏览器刷新：已登录时重新请求一次推荐，更新待播列表（未完成冷启动前不请求，避免空偏好请求覆盖后端）
   useEffect(() => {
     if (!isLoggedIn) return;
     const username = getCurrentUser();
     if (!username) return;
+    const completed = localStorage.getItem(`hasCompletedFirstLogin-${username}`) === 'true';
+    if (!completed) return;
     const sys = usePlayerStore.getState().currentSystem;
     const prefs = usePlayerStore.getState().getUserPreferences();
     getRecommendations({
@@ -212,15 +214,15 @@ function App() {
     })
       .then((result) => {
         if (result.recommendedTracks?.length > 0) {
-          usePlayerStore.getState().setRecommendedTrackIds(result.recommendedTracks, result.recommendedScores, result.firstTracks);
+          usePlayerStore.getState().setRecommendedTrackIds(result.recommendedTracks, result.recommendedScores, result.firstTracks, '刷新 / 偏好更新');
           setPlaylist(username, result.recommendedTracks, sys).catch(() => {});
         }
       })
       .catch(() => {});
   }, [isLoggedIn]);
 
-  // 清除记录：无论当前在系统 A 还是 B，立刻清除数据并回到冷启动阶段
-  const handleClearData = () => {
+  // 清除记录：无论当前在系统 A 还是 B，立刻清除数据并回到冷启动阶段；等服务端清空完成后再结束，保证下次推荐时历史已推荐/行为历史为 0、LLM 无旧上下文
+  const handleClearData = async () => {
     if (!window.confirm('确定要清除所有记录吗？将清除偏好、对话历史、听歌行为、收藏与播放历史，并回到冷启动阶段，小助手也不会再记得您之前的任何行为。')) return;
     const currentUser = localStorage.getItem('currentUser');
 
@@ -236,14 +238,10 @@ function App() {
     sessionStartTimeRef.current = 0;
     if (currentUser) localStorage.removeItem(SESSION_START_KEY(currentUser));
 
-    // 2. 后台清除服务端数据（A/B 的待播列表与服务端记录都清）
+    // 2. 等待服务端清空完成，再结束，保证下次推荐时历史已推荐曲目数/行为历史记录数从 0 考虑、LLM 无旧上下文
     if (currentUser) {
-      (async () => {
-        try {
-          await clearAllUserDataOnServer(currentUser);
-        } catch (e) {
-          console.error('清除服务端用户数据失败:', e);
-        }
+      try {
+        await clearAllUserDataOnServer(currentUser);
         for (const system of ['A', 'B'] as const) {
           try {
             await setPlaylist(currentUser, [], system);
@@ -251,7 +249,9 @@ function App() {
             console.error(`清空待播列表(${system})失败:`, e);
           }
         }
-      })();
+      } catch (e) {
+        console.error('清除服务端用户数据失败:', e);
+      }
     }
   };
 
@@ -313,10 +313,9 @@ function App() {
           <button
             type="button"
             onClick={toggleSystem}
-            title="点击切换 A/B 系统（A=无小助手，B=Seren 小助手）"
-            className="px-3 py-1.5 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-all border border-gray-300"
+            className="px-3 py-1.5 text-sm text-gray-700 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-all border border-gray-300"
           >
-            切换至系统 {currentSystem === 'A' ? 'B' : 'A'}
+            {currentSystem === 'A' ? 'B' : 'A'}
           </button>
         </div>
         <div className="flex items-center gap-3">
@@ -421,7 +420,7 @@ function App() {
                   style={{ right: '25%' }}
                 />
                 <div
-                  className="absolute inset-0 h-full overflow-hidden z-30"
+                  className="absolute inset-0 h-full min-h-0 flex flex-col overflow-hidden z-30"
                   style={{ right: '25%' }}
                 >
                   <AIAssistant
@@ -434,9 +433,9 @@ function App() {
             )}
           </div>
 
-          {/* 系统 B：AI 小助手区域 */}
+          {/* 系统 B：AI 小助手区域 - flex flex-col min-h-0 保证内部可滚动 */}
           {currentSystem === 'B' && isAssistantVisible && (hasCompletedFirstLogin || currentTrack || !checkIsFirstLogin()) && (
-            <div className="w-1/3 flex-shrink-0 h-full overflow-hidden">
+            <div className="w-1/3 flex-shrink-0 h-full min-h-0 flex flex-col overflow-hidden">
               <AIAssistant
                 key={`normal-${assistantClearKey}`}
                 onToggleAssistant={() => setIsAssistantVisible(false)}

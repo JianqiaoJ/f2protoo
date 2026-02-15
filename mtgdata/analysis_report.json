@@ -1,0 +1,185 @@
+[
+  {
+    "file": "autotagging.tsv",
+    "columns": [
+      "TRACK_ID",
+      "ARTIST_ID",
+      "ALBUM_ID",
+      "PATH",
+      "DURATION",
+      "TAGS"
+    ],
+    "has_track_name": false,
+    "has_artist_name": false,
+    "has_year": false,
+    "total_rows": 6209,
+    "distinct_tags_count": 108,
+    "tag_categories": {
+      "genre": 5989,
+      "mood/theme": 123,
+      "instrument": 97
+    }
+  },
+  {
+    "file": "autotagging_genre.tsv",
+    "columns": [
+      "TRACK_ID",
+      "ARTIST_ID",
+      "ALBUM_ID",
+      "PATH",
+      "DURATION",
+      "TAGS"
+    ],
+    "has_track_name": false,
+    "has_artist_name": false,
+    "has_year": false,
+    "total_rows": 11721,
+    "distinct_tags_count": 90,
+    "tag_categories": {
+      "genre": 11721
+    }
+  },
+  {
+    "file": "autotagging_instrument.tsv",
+    "columns": [
+      "TRACK_ID",
+      "ARTIST_ID",
+      "ALBUM_ID",
+      "PATH",
+      "DURATION",
+      "TAGS"
+    ],
+    "has_track_name": false,
+    "has_artist_name": false,
+    "has_year": false,
+    "total_rows": 10839,
+    "distinct_tags_count": 41,
+    "tag_categories": {
+      "instrument": 10839
+    }
+  },
+  {
+    "file": "autotagging_moodtheme.tsv",
+    "columns": [
+      "TRACK_ID",
+      "ARTIST_ID",
+      "ALBUM_ID",
+      "PATH",
+      "DURATION",
+      "TAGS"
+    ],
+    "has_track_name": false,
+    "has_artist_name": false,
+    "has_year": false,
+    "total_rows": 9947,
+    "distinct_tags_count": 59,
+    "tag_categories": {
+      "mood/theme": 9947
+    }
+  },
+  {
+    "file": "autotagging_top50tags.tsv",
+    "columns": [
+      "TRACK_ID",
+      "ARTIST_ID",
+      "ALBUM_ID",
+      "PATH",
+      "DURATION",
+      "TAGS"
+    ],
+    "has_track_name": false,
+    "has_artist_name": false,
+    "has_year": false,
+    "total_rows": 11052,
+    "distinct_tags_count": 50,
+    "tag_categories": {
+      "genre": 10535,
+      "instrument": 434,
+      "mood/theme": 83
+    }
+  },
+  {
+    "file": "raw.tsv",
+    "columns": [
+      "TRACK_ID",
+      "ARTIST_ID",
+      "ALBUM_ID",
+      "PATH",
+      "DURATION",
+      "TAGS"
+    ],
+    "has_track_name": false,
+    "has_artist_name": false,
+    "has_year": false,
+    "total_rows": 5133,
+    "distinct_tags_count": 127,
+    "tag_categories": {
+      "genre": 4959,
+      "mood/theme": 110,
+      "instrument": 64
+    }
+  },
+  {
+    "file": "raw_30s.tsv",
+    "columns": [
+      "TRACK_ID",
+      "ARTIST_ID",
+      "ALBUM_ID",
+      "PATH",
+      "DURATION",
+      "TAGS"
+    ],
+    "has_track_name": false,
+    "has_artist_name": false,
+    "has_year": false,
+    "total_rows": 5094,
+    "distinct_tags_count": 127,
+    "tag_categories": {
+      "genre": 4922,
+      "mood/theme": 108,
+      "instrument": 64
+    }
+  },
+  {
+    "file": "raw_30s_cleantags.tsv",
+    "columns": [
+      "TRACK_ID",
+      "ARTIST_ID",
+      "ALBUM_ID",
+      "PATH",
+      "DURATION",
+      "TAGS"
+    ],
+    "has_track_name": false,
+    "has_artist_name": false,
+    "has_year": false,
+    "total_rows": 5107,
+    "distinct_tags_count": 124,
+    "tag_categories": {
+      "genre": 4931,
+      "mood/theme": 111,
+      "instrument": 65
+    }
+  },
+  {
+    "file": "raw_30s_cleantags_50artists.tsv",
+    "columns": [
+      "TRACK_ID",
+      "ARTIST_ID",
+      "ALBUM_ID",
+      "PATH",
+      "DURATION",
+      "TAGS"
+    ],
+    "has_track_name": false,
+    "has_artist_name": false,
+    "has_year": false,
+    "total_rows": 6209,
+    "distinct_tags_count": 108,
+    "tag_categories": {
+      "genre": 5989,
+      "mood/theme": 123,
+      "instrument": 97
+    }
+  }
+]

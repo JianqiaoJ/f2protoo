@@ -2,6 +2,23 @@ import axios from 'axios';
 
 const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:3000';
 
+const BACKEND_CHECK_TIMEOUT_MS = 3000;
+
+/**
+ * 冷启动前快速检查后端是否可用，避免长时间等待保存偏好超时
+ */
+export async function checkBackendHealth(): Promise<void> {
+  try {
+    await axios.get(`${API_BASE_URL}/api/users`, { timeout: BACKEND_CHECK_TIMEOUT_MS });
+  } catch (error: any) {
+    const hint = '请先在 backend 目录运行: npm run start 或 node server.js';
+    const msg = error?.code === 'ECONNABORTED'
+      ? `连接后端超时(${BACKEND_CHECK_TIMEOUT_MS}ms)。${hint}`
+      : `无法连接后端(${API_BASE_URL})。${hint}`;
+    throw new Error(msg);
+  }
+}
+
 export type PreferenceUpdateOperation =
   | 'conversation'      // 对话中表达偏好
   | 'first_login'       // 首次登录填写偏好

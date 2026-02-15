@@ -43,21 +43,32 @@ function parseTags(tagsString) {
 // 加载标签数据
 let trackTagsMap = new Map();
 let allTrackIds = [];
+// 标签 -> trackId 集合，用于推荐时只对候选集打分，避免全量 4 万+ 遍历
+let tagToTrackIds = { genres: new Map(), instruments: new Map(), moods: new Map(), themes: new Map() };
+
+function addTagToIndex(tagType, tag, trackId) {
+  if (!tag || !trackId) return;
+  let set = tagToTrackIds[tagType].get(tag);
+  if (!set) {
+    set = new Set();
+    tagToTrackIds[tagType].set(tag, set);
+  }
+  set.add(trackId);
+}
 
 function loadTrackTags() {
   try {
-    // raw.tsv文件路径（优先使用当前目录，如果不存在则使用上一级目录）
     let tsvPath = join(__dirname, 'raw.tsv');
     if (!existsSync(tsvPath)) {
       tsvPath = join(__dirname, '..', 'raw.tsv');
     }
     const content = readFileSync(tsvPath, 'utf-8');
     const lines = content.split('\n');
-    
+
     trackTagsMap.clear();
     allTrackIds = [];
-    
-    // 跳过表头
+    tagToTrackIds = { genres: new Map(), instruments: new Map(), moods: new Map(), themes: new Map() };
+
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i].trim();
       if (line) {
@@ -65,23 +76,49 @@ function loadTrackTags() {
         if (columns[0]) {
           const trackId = columns[0];
           allTrackIds.push(trackId);
-          
-          // 解析tags（从第6列开始）
+
           if (columns.length > 5) {
             const tagsString = columns.slice(5).join('\t');
             const tags = parseTags(tagsString);
             trackTagsMap.set(trackId, tags);
+            (tags.genres || []).forEach((t) => addTagToIndex('genres', t, trackId));
+            (tags.instruments || []).forEach((t) => addTagToIndex('instruments', t, trackId));
+            // mood 与 theme 是同一类标签，索引时同时写入 moods 和 themes，便于偏好任一侧都能命中
+            const moodThemeTags = [...new Set([...(tags.moods || []), ...(tags.themes || [])])];
+            moodThemeTags.forEach((t) => {
+              addTagToIndex('moods', t, trackId);
+              addTagToIndex('themes', t, trackId);
+            });
           }
         }
       }
     }
-    
+
     console.log(`已加载 ${allTrackIds.length} 首歌曲的标签数据`);
     return true;
   } catch (error) {
     console.error('加载标签数据失败:', error);
     return false;
   }
+}
+
+// 根据合并偏好得到候选 trackId 集合（至少匹配一个标签），用于只对候选打分
+function getCandidateTrackIds(combinedPrefs) {
+  const candidateIds = new Set();
+  const types = ['genres', 'instruments', 'moods', 'themes'];
+  for (const type of types) {
+    const tags = combinedPrefs[type];
+    if (Array.isArray(tags) && tags.length > 0) {
+      const index = tagToTrackIds[type];
+      if (index) {
+        for (const tag of tags) {
+          const set = index.get(tag);
+          if (set) set.forEach((id) => candidateIds.add(id));
+        }
+      }
+    }
+  }
+  return candidateIds;
 }
 
 // 计算内容匹配分数
@@ -411,9 +448,18 @@ export function generateRecommendations(
     ...behaviorHistory.map((r) => normalizeId(r.track_id)),
     ...(Array.isArray(additionalExcludedIds) ? additionalExcludedIds : []).map(normalizeId).filter(Boolean)
   ]);
-  
-  // 计算候选歌曲的分数（全量打分，不抽样）
-  const scoredTracks = allTrackIds
+
+  // 只对候选集打分：有偏好时用「至少匹配一个标签」的 trackId 集合，否则用全量（冷启动随机）
+  const candidateSet = getCandidateTrackIds(combinedPrefs);
+  const idsToScore = candidateSet.size > 0 ? Array.from(candidateSet) : allTrackIds;
+  if (idsToScore.length > 0 && idsToScore.length <= 20) {
+    console.log(`📐 候选集大小: ${idsToScore.length}（偏好匹配）`);
+  } else if (candidateSet.size > 0) {
+    console.log(`📐 候选集大小: ${idsToScore.length}（仅对偏好匹配打分，加速推荐）`);
+  }
+
+  // 计算候选歌曲的分数
+  const scoredTracks = idsToScore
     .map(trackId => {
       const trackTags = trackTagsMap.get(trackId);
       if (!trackTags) return { trackId, score: 0, contentScore: 0, behaviorScore: 0 };

@@ -25,7 +25,8 @@ export interface PreferenceHeatmapResponse {
   message?: string;
 }
 
-const HEATMAP_REQUEST_TIMEOUT_MS = 20000;
+/** 偏好热力图请求超时：后端可能较慢或冷启动，GPT-4o 等模型下用户常先打开此弹窗，适当延长避免误报超时 */
+const HEATMAP_REQUEST_TIMEOUT_MS = 45000;
 
 /**
  * 获取用户偏好热力图数据（带超时，避免一直加载）

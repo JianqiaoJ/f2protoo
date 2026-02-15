@@ -430,6 +430,23 @@ export function tagToChinese(tag: string): string {
   return TAG_ZH[key] ?? tag;
 }
 
+/** 中文 -> 英文 tag（用于 extractPreferences 返回中文时在 mapUserInputToTags 中解析为 raw 用英文） */
+let ZH_TO_TAG: Record<string, string> | null = null;
+function buildChineseToTag(): Record<string, string> {
+  if (ZH_TO_TAG) return ZH_TO_TAG;
+  const out: Record<string, string> = {};
+  for (const [en, zh] of Object.entries(TAG_ZH)) {
+    if (zh && !out[zh]) out[zh] = en;
+  }
+  ZH_TO_TAG = out;
+  return out;
+}
+export function chineseToTag(zh: string): string | null {
+  if (!zh || typeof zh !== 'string') return null;
+  const t = zh.trim();
+  return buildChineseToTag()[t] ?? null;
+}
+
 /** 冷启动等展示用：英文 tag + 中文翻译，如 "edm 电子舞曲"；无翻译则只显示英文 */
 export function tagWithChinese(tag: string): string {
   if (!tag || typeof tag !== 'string') return tag;

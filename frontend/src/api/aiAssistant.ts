@@ -1,12 +1,43 @@
 import axios from 'axios';
 import { getSerenLLMProvider } from '../utils/storage';
+import { chineseToTag } from '../utils/tagToChinese';
 import { appendSystemLog } from './logs';
 
 const DEEPSEEK_API_KEY = 'sk-adfb9647455540ad807e6511ae8abe98';
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
-const OPENROUTER_API_KEY = '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';
+// OpenRouter：必须从环境变量 VITE_OPENROUTER_API_KEY 读取（并 trim）。未设置或密钥无效会返回 "User not found" 或 "Failed to authenticate request with Clerk"，请到 https://openrouter.ai/keys 获取密钥，参见 https://openrouter.ai/docs/quickstart
+const _rawOpenRouterKey = (import.meta as any).env?.VITE_OPENROUTER_API_KEY ?? '';
+const OPENROUTER_API_KEY = String(_rawOpenRouterKey).trim();
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+
+/** OpenRouter 返回认证相关错误时（User not found / Clerk / 401），表示 API Key 无效或未设置，附加解决提示 */
+function openRouterErrorHint(errMsg: string, status?: number): string {
+  const msg = String(errMsg);
+  const isAuthError =
+    status === 401 ||
+    /user not found|invalid.*key|unauthorized|failed to authenticate|clerk/i.test(msg);
+  if (!isAuthError) return '';
+  return ' （请到 https://openrouter.ai/keys 获取 API Key，在本项目 frontend 目录下的 .env 或 .env.local 中设置 VITE_OPENROUTER_API_KEY=sk-or-v1-xxx；.env.example 仅为模板，不会被读取。参见 https://openrouter.ai/docs/quickstart）';
+}
 const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:3000';
+
+/** 供 OpenRouter 使用的完整 headers（Authorization + 可选 Referer，部分环境下可避免 401） */
+function getOpenRouterHeaders(): Record<string, string> {
+  // #region agent log
+  const keyLen = OPENROUTER_API_KEY.length;
+  const keyEmpty = keyLen === 0;
+  const keyPrefixOk = OPENROUTER_API_KEY.startsWith('sk-or-v1');
+  fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'aiAssistant.ts:getOpenRouterHeaders', message: 'OpenRouter key at request build', data: { keyLength: keyLen, keyEmpty, keyPrefixOk }, timestamp: Date.now(), hypothesisId: 'H1-H4' }) }).catch(() => {});
+  // #endregion
+  const h: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+  };
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    h['HTTP-Referer'] = window.location.origin;
+  }
+  return h;
+}
 
 /** 从 choice 取出 content；若 finish_reason 为 length 则打日志（便于排查「老被截断」） */
 function getChoiceContent(choice: any, fallback: string): string {
@@ -43,74 +74,25 @@ function getLLMConfig(): { url: string; headers: Record<string, string>; model: 
     };
   }
   if (provider === 'gemini_25') {
-    return {
-      url: OPENROUTER_URL,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      },
-      model: 'google/gemini-2.5-pro',
-    };
+    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'google/gemini-2.5-pro' };
   }
   if (provider === 'gemini') {
-    return {
-      url: OPENROUTER_URL,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      },
-      model: 'google/gemini-3-pro-preview',
-    };
+    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'google/gemini-3-pro-preview' };
   }
   if (provider === 'gemini_3_flash') {
-    return {
-      url: OPENROUTER_URL,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      },
-      model: 'google/gemini-3-flash-preview',
-    };
+    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'google/gemini-3-flash-preview' };
   }
   if (provider === 'kimi_k2_5') {
-    return {
-      url: OPENROUTER_URL,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      },
-      model: 'moonshotai/kimi-k2.5',
-    };
+    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'moonshotai/kimi-k2.5' };
   }
   if (provider === 'chatgpt4o') {
-    return {
-      url: OPENROUTER_URL,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      },
-      model: 'openai/gpt-4o',
-    };
+    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'openai/gpt-4o' };
   }
   if (provider === 'qwen') {
-    return {
-      url: OPENROUTER_URL,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      },
-      model: 'qwen/qwen3-max-thinking',
-    };
+    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'qwen/qwen3-max-thinking' };
   }
   // chatgpt5：Open Router 上 OpenAI 系（GPT-5.2）
-  return {
-    url: OPENROUTER_URL,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-    },
-    model: 'openai/gpt-5.2-chat',
-  };
+  return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'openai/gpt-5.2-chat' };
 }
 
 /** 供设置弹窗展示：根据 provider 返回实际使用的模型名 */
@@ -368,49 +350,42 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
           ) || null;
         };
         
-        // 对未通过验证的标签尝试找到相似标签
+        // 对未通过验证的标签：先尝试中文→英文解析（extractPreferences 常返回中文），再尝试相似标签
+        const resolveTag = (tag: string, available: string[], final: string[], category: string): boolean => {
+          if (final.includes(tag)) return true;
+          if (available.includes(tag)) {
+            final.push(tag);
+            return true;
+          }
+          const fromChinese = chineseToTag(tag);
+          if (fromChinese && available.includes(fromChinese) && !final.includes(fromChinese)) {
+            console.log(`🔄 标签解析(中文→英文): "${tag}" → "${fromChinese}" (${category})`);
+            final.push(fromChinese);
+            return true;
+          }
+          const similar = findSimilarTag(tag, available);
+          if (similar && !final.includes(similar)) {
+            console.log(`🔄 标签替换: "${tag}" → "${similar}" (${category})`);
+            final.push(similar);
+            return true;
+          }
+          return false;
+        };
         const finalGenres = [...validatedGenres];
         (parsed.genres || []).forEach((tag: string) => {
-          if (!validatedGenres.includes(tag)) {
-            const similar = findSimilarTag(tag, availableTags.genres);
-            if (similar && !finalGenres.includes(similar)) {
-              console.log(`🔄 标签替换: "${tag}" → "${similar}" (风格)`);
-              finalGenres.push(similar);
-            }
-          }
+          if (!validatedGenres.includes(tag)) resolveTag(tag, availableTags.genres, finalGenres, '风格');
         });
-        
         const finalInstruments = [...validatedInstruments];
         (parsed.instruments || []).forEach((tag: string) => {
-          if (!validatedInstruments.includes(tag)) {
-            const similar = findSimilarTag(tag, availableTags.instruments);
-            if (similar && !finalInstruments.includes(similar)) {
-              console.log(`🔄 标签替换: "${tag}" → "${similar}" (乐器)`);
-              finalInstruments.push(similar);
-            }
-          }
+          if (!validatedInstruments.includes(tag)) resolveTag(tag, availableTags.instruments, finalInstruments, '乐器');
         });
-        
         const finalMoods = [...validatedMoods];
         (parsed.moods || []).forEach((tag: string) => {
-          if (!validatedMoods.includes(tag)) {
-            const similar = findSimilarTag(tag, availableTags.moods);
-            if (similar && !finalMoods.includes(similar)) {
-              console.log(`🔄 标签替换: "${tag}" → "${similar}" (情绪)`);
-              finalMoods.push(similar);
-            }
-          }
+          if (!validatedMoods.includes(tag)) resolveTag(tag, availableTags.moods, finalMoods, '情绪');
         });
-        
         const finalThemes = [...validatedThemes];
         (parsed.themes || []).forEach((tag: string) => {
-          if (!validatedThemes.includes(tag)) {
-            const similar = findSimilarTag(tag, availableTags.themes);
-            if (similar && !finalThemes.includes(similar)) {
-              console.log(`🔄 标签替换: "${tag}" → "${similar}" (主题)`);
-              finalThemes.push(similar);
-            }
-          }
+          if (!validatedThemes.includes(tag)) resolveTag(tag, availableTags.themes, finalThemes, '主题');
         });
         
         return {
@@ -427,27 +402,33 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
     }
   },
 
-  // 识别用户消息中的音乐偏好
+  // 识别用户消息中的音乐偏好（喜欢或不喜欢）
   async extractPreferences(userMessage: string): Promise<{
+    isDislike?: boolean;
     genres: string[];
     instruments: string[];
     moods: string[];
     themes: string[];
   }> {
     try {
-      const systemPrompt = `你是一个音乐偏好提取助手。从用户的消息中提取用户喜欢的音乐风格(genre)、乐器(instrument)、情绪(mood)或主题(theme)。
+      const systemPrompt = `你是一个音乐偏好提取助手。从用户的消息中提取音乐风格(genre)、乐器(instrument)、情绪(mood)或主题(theme)。
+
+规则：
+1. 若用户表达「喜欢」「想要」某类音乐，则 isDislike 为 false，将对应标签放入各数组。
+2. 若用户表达「不喜欢」「讨厌」「别推荐」「不要」某类音乐/风格/特征，则 isDislike 为 true，将用户不喜欢的风格或特征放入对应数组。
 
 用户消息：${userMessage}
 
-请以JSON格式返回，格式如下：
+请以JSON格式返回：
 {
-  "genres": ["风格1", "风格2"],
-  "instruments": ["乐器1", "乐器2"],
-  "moods": ["情绪1", "情绪2"],
-  "themes": ["主题1", "主题2"]
+  "isDislike": true或false,
+  "genres": ["风格1"],
+  "instruments": ["乐器1"],
+  "moods": ["情绪1"],
+  "themes": ["主题1"]
 }
 
-如果没有找到对应的偏好，返回空数组。只返回JSON，不要其他文字。`;
+未提及的类别返回空数组。只返回JSON，不要其他文字。`;
 
       const cfg = getLLMConfig();
       const response = await axios.post(
@@ -469,11 +450,11 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
 
       appendSystemLog(`[LLM] 本次调用模型: ${cfg.model}`);
       const content = response.data.choices[0]?.message?.content || '{}';
-      // 尝试提取JSON
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
         return {
+          isDislike: parsed.isDislike === true,
           genres: parsed.genres || [],
           instruments: parsed.instruments || [],
           moods: parsed.moods || [],
@@ -788,16 +769,18 @@ ${recentHistory}
 用户最新输入：${userInput}
 
 请分析：
-1. 用户的新输入是否表达了与当前偏好矛盾的偏好？（例如：之前喜欢jazz，现在说不喜欢；或之前不喜欢rock，现在说喜欢rock）
-2. 如果存在矛盾，请用第二人称「你」、简洁自然地描述（不超过30字），例如："你之前偏好乡村和民谣，但刚刚提到想说唱音乐。" 不要用「用户」「新输入」等第三人称。
-3. 如果存在矛盾，请生成一个简短的选择问题（不超过20字），直接问用户，例如："那你喜欢说唱吗？" 或 "是否喜欢说唱音乐？"
-4. 如果存在矛盾，请指出冲突的标签类型（genres/instruments/moods/themes）和具体的标签名称
+1. 用户的新输入是否表达了与当前偏好矛盾的偏好？（例如：之前喜欢jazz，现在说不喜欢；或之前偏好重金属，现在提到喜欢爵士）
+2. 如果存在矛盾，请用第二人称「你」、简洁自然地描述（不超过30字），例如："你之前偏好重金属和歌剧，但刚刚提到喜欢爵士。" 不要用「用户」「新输入」等第三人称。
+3. 如果存在矛盾，先评估：原有偏好与刚提到的偏好是否风格反差很大。
+   - 反差很大：如重金属/歌剧 vs 爵士、古典 vs 电子、金属 vs 轻音乐等，问句用比较型，例如："你更喜欢爵士乐吗？"、"你更想听爵士吗？"
+   - 反差不大：如民谣 vs 流行、钢琴 vs 吉他等较接近的风格，问句用补充型，例如："你也喜欢爵士乐吗？"、"是否也喜欢爵士？"
+4. 如果存在矛盾，请指出冲突的标签类型（genres/instruments/moods/themes）和具体的标签名称。
 
 请以JSON格式返回：
 {
   "hasConflict": true/false,
   "conflictDescription": "矛盾描述（第二人称，如果有冲突）",
-  "choiceQuestion": "选择问题（如果有冲突）",
+  "choiceQuestion": "选择问题（如果有冲突；反差大时用「你更喜欢X吗？」类比较问句，反差小时用「你也喜欢X吗？」类补充问句）",
   "conflictingTag": "冲突的标签名称（如果有冲突）",
   "tagType": "genres/instruments/moods/themes（如果有冲突）"
 }
@@ -881,6 +864,8 @@ ${recentHistory}
 请生成解释文本：`;
 
       const cfg = getLLMConfig();
+      /** GPT-4o 等模型响应较慢，给足时间避免超时导致「生成不了」 */
+      const HEATMAP_EXPLANATION_TIMEOUT_MS = 70000;
       const response = await axios.post(
         cfg.url,
         {
@@ -895,6 +880,7 @@ ${recentHistory}
         },
         {
           headers: cfg.headers,
+          timeout: HEATMAP_EXPLANATION_TIMEOUT_MS,
         }
       );
 
@@ -909,7 +895,7 @@ ${recentHistory}
     }
   },
 
-  /** 为什么推荐这首：根据推荐算法对这首歌的评分，用简洁优美的语言描述推荐理由 */
+  /** 为什么推荐这首：根据推荐算法对这首歌的评分，用简洁优美的语言描述推荐理由；isColdStart 时语气更热情、简洁、优美 */
   async generateWhyThisTrack(
     whyData: {
       contentScore: number;
@@ -919,7 +905,8 @@ ${recentHistory}
       trackTags: { genres: string[]; instruments: string[]; moods: string[]; themes: string[] };
     },
     trackName: string,
-    artistName: string
+    artistName: string,
+    isColdStart?: boolean
   ): Promise<string> {
     try {
       const matchedGenres = whyData.matchedTags.genres.join('、') || '无';
@@ -931,7 +918,8 @@ ${recentHistory}
       const trackMoods = whyData.trackTags.moods.join('、') || '无';
       const trackThemes = whyData.trackTags.themes.join('、') || '无';
 
-      const systemPrompt = `你是一个音乐推荐助手。用户想知道「为什么系统推荐了这首《${trackName}》- ${artistName}」。请根据推荐算法的评分数据，用简洁、优美的语言（2-4句话，约80-120字）描述推荐理由。
+      const coldStartHint = isColdStart ? '这是用户冷启动后第一首推荐（系统 B），请用热情、简洁、优美的语言描述推荐理由，让用户感到被懂、被欢迎。控制在 2-4 句话、80-120 字，语气热情、简洁、优美。' : '';
+      const systemPrompt = `你是一个音乐推荐助手。用户想知道「为什么系统推荐了这首《${trackName}》- ${artistName}」。请根据推荐算法的评分数据，用简洁、优美的语言（2-4句话，约80-120字）描述推荐理由。${coldStartHint ? '\n\n' + coldStartHint : ''}
 
 推荐算法数据：
 - 内容匹配分数（与用户偏好标签的匹配度，权重60%）：${whyData.contentScore.toFixed(3)}
@@ -971,7 +959,14 @@ ${SONG_DESCRIPTION_LAYERS}
       return getChoiceContent(response.data.choices[0], '这首歌与你的偏好和听歌习惯很契合，所以推荐给你。');
     } catch (error: any) {
       console.error('生成为什么推荐这首失败:', error);
-      return '这首歌与你的偏好和听歌习惯很契合，所以推荐给你。';
+      const cfg = getLLMConfig();
+      const errMsg = error?.response?.data?.error?.message ?? error?.message ?? String(error);
+      const status = error?.response?.status;
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'aiAssistant.ts:generateWhyThisTrack catch', message: 'OpenRouter LLM error', data: { status, errMsgSnippet: String(errMsg).slice(0, 80), keyLength: OPENROUTER_API_KEY.length, keyEmpty: OPENROUTER_API_KEY.length === 0 }, timestamp: Date.now(), hypothesisId: 'H1-H5' }) }).catch(() => {});
+      // #endregion
+      const hint = openRouterErrorHint(errMsg, status);
+      return `【LLM 调用失败】模型: ${cfg.model}，错误: ${errMsg}${hint}`;
     }
   },
 
@@ -1100,9 +1095,16 @@ ${SONG_DESCRIPTION_LAYERS}
       if (!response.data?.choices?.length) throw new Error('无效响应');
       appendSystemLog(`[LLM] 本次调用模型: ${cfg.model}`);
       return getChoiceContent(response.data.choices[0], '这首歌与你的听歌偏好很契合，所以推荐给你。');
-    } catch (e) {
+    } catch (e: any) {
       console.error('生成为什么推荐这首（兜底）失败:', e);
-      return '这首歌与你的听歌偏好很契合，所以推荐给你。';
+      const cfg = getLLMConfig();
+      const errMsg = e?.response?.data?.error?.message ?? e?.message ?? String(e);
+      const status = e?.response?.status;
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'aiAssistant.ts:generateWhyThisTrackFallback catch', message: 'OpenRouter LLM error', data: { status, errMsgSnippet: String(errMsg).slice(0, 80), keyLength: OPENROUTER_API_KEY.length, keyEmpty: OPENROUTER_API_KEY.length === 0 }, timestamp: Date.now(), hypothesisId: 'H1-H5' }) }).catch(() => {});
+      // #endregion
+      const hint = openRouterErrorHint(errMsg, status);
+      return `【LLM 调用失败】模型: ${cfg.model}，错误: ${errMsg}${hint}`;
     }
   },
 

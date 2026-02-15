@@ -1,0 +1,530 @@
+
+================================================================================
+分析文件: autotagging.tsv
+================================================================================
+
+字段列表: ['TRACK_ID', 'ARTIST_ID', 'ALBUM_ID', 'PATH', 'DURATION', 'TAGS']
+字段数量: 6
+
+是否包含歌曲名字: False
+是否包含歌手名字: False
+是否包含年份/日期字段: False
+
+总记录数: 6209
+
+Distinct Tags数量: 108
+Tag类别统计: {'genre': 5989, 'mood/theme': 123, 'instrument': 97}
+
+最常见的20个标签:
+  genre---electronic: 1656次
+  genre---pop: 575次
+  genre---reggae: 519次
+  genre---rock: 454次
+  genre---classical: 371次
+  genre---hiphop: 279次
+  genre---soundtrack: 274次
+  genre---metal: 211次
+  genre---easylistening: 173次
+  genre---jazz: 130次
+  genre---ambient: 123次
+  genre---alternative: 117次
+  genre---techno: 109次
+  genre---trance: 81次
+  genre---punkrock: 69次
+  genre---industrial: 53次
+  genre---poprock: 51次
+  genre---experimental: 46次
+  instrument---piano: 44次
+  mood/theme---dream: 38次
+
+数据示例（前3行）:
+        TRACK_ID      ARTIST_ID      ALBUM_ID        PATH  DURATION              TAGS
+0  track_0000214  artist_000014  album_000031  14/214.mp3     124.6  genre---punkrock
+1  track_0000215  artist_000014  album_000031  15/215.mp3     151.4     genre---metal
+2  track_0000216  artist_000014  album_000031  16/216.mp3     234.9     genre---metal
+
+================================================================================
+分析文件: autotagging_genre.tsv
+================================================================================
+
+字段列表: ['TRACK_ID', 'ARTIST_ID', 'ALBUM_ID', 'PATH', 'DURATION', 'TAGS']
+字段数量: 6
+
+是否包含歌曲名字: False
+是否包含歌手名字: False
+是否包含年份/日期字段: False
+
+总记录数: 11721
+
+Distinct Tags数量: 90
+Tag类别统计: {'genre': 11721}
+
+最常见的20个标签:
+  genre---electronic: 2346次
+  genre---classical: 1745次
+  genre---pop: 891次
+  genre---soundtrack: 757次
+  genre---rock: 637次
+  genre---reggae: 554次
+  genre---hiphop: 447次
+  genre---ambient: 442次
+  genre---jazz: 355次
+  genre---metal: 335次
+  genre---poprock: 328次
+  genre---easylistening: 319次
+  genre---experimental: 295次
+  genre---newage: 162次
+  genre---techno: 159次
+  genre---folk: 149次
+  genre---trance: 136次
+  genre---alternative: 130次
+  genre---blues: 121次
+  genre---industrial: 81次
+
+数据示例（前3行）:
+        TRACK_ID      ARTIST_ID      ALBUM_ID        PATH  DURATION              TAGS
+0  track_0000214  artist_000014  album_000031  14/214.mp3     124.6  genre---punkrock
+1  track_0000215  artist_000014  album_000031  15/215.mp3     151.4     genre---metal
+2  track_0000216  artist_000014  album_000031  16/216.mp3     234.9     genre---metal
+
+================================================================================
+分析文件: autotagging_instrument.tsv
+================================================================================
+
+字段列表: ['TRACK_ID', 'ARTIST_ID', 'ALBUM_ID', 'PATH', 'DURATION', 'TAGS']
+字段数量: 6
+
+是否包含歌曲名字: False
+是否包含歌手名字: False
+是否包含年份/日期字段: False
+
+总记录数: 10839
+
+Distinct Tags数量: 41
+Tag类别统计: {'instrument': 10839}
+
+最常见的20个标签:
+  instrument---piano: 3328次
+  instrument---synthesizer: 2093次
+  instrument---guitar: 1689次
+  instrument---computer: 560次
+  instrument---acousticguitar: 305次
+  instrument---electricguitar: 270次
+  instrument---beat: 265次
+  instrument---bass: 246次
+  instrument---orchestra: 204次
+  instrument---strings: 199次
+  instrument---ukulele: 159次
+  instrument---drums: 157次
+  instrument---violin: 132次
+  instrument---voice: 112次
+  instrument---classicalguitar: 111次
+  instrument---percussion: 108次
+  instrument---flute: 100次
+  instrument---harp: 87次
+  instrument---saxophone: 75次
+  instrument---keyboard: 75次
+
+数据示例（前3行）:
+        TRACK_ID      ARTIST_ID      ALBUM_ID        PATH  DURATION                TAGS
+0  track_0000382  artist_000020  album_000046  82/382.mp3     211.1  instrument---voice
+1  track_0000383  artist_000020  album_000046  83/383.mp3     113.1  instrument---voice
+2  track_0000384  artist_000020  album_000046  84/384.mp3     115.7  instrument---voice
+
+================================================================================
+分析文件: autotagging_moodtheme.tsv
+================================================================================
+
+字段列表: ['TRACK_ID', 'ARTIST_ID', 'ALBUM_ID', 'PATH', 'DURATION', 'TAGS']
+字段数量: 6
+
+是否包含歌曲名字: False
+是否包含歌手名字: False
+是否包含年份/日期字段: False
+
+总记录数: 9947
+
+Distinct Tags数量: 59
+Tag类别统计: {'mood/theme': 9947}
+
+最常见的20个标签:
+  mood/theme---melodic: 688次
+  mood/theme---energetic: 601次
+  mood/theme---dark: 588次
+  mood/theme---film: 552次
+  mood/theme---relaxing: 482次
+  mood/theme---dream: 418次
+  mood/theme---ambiental: 394次
+  mood/theme---love: 366次
+  mood/theme---soundscape: 311次
+  mood/theme---emotional: 307次
+  mood/theme---sad: 303次
+  mood/theme---christmas: 275次
+  mood/theme---happy: 248次
+  mood/theme---deep: 242次
+  mood/theme---epic: 239次
+  mood/theme---space: 226次
+  mood/theme---meditative: 220次
+  mood/theme---ballad: 176次
+  mood/theme---romantic: 156次
+  mood/theme---slow: 143次
+
+数据示例（前3行）:
+        TRACK_ID      ARTIST_ID      ALBUM_ID        PATH  DURATION                     TAGS
+0  track_0000948  artist_000087  album_000149  48/948.mp3     212.7  mood/theme---background
+1  track_0000950  artist_000087  album_000149  50/950.mp3     248.0  mood/theme---background
+2  track_0000951  artist_000087  album_000149  51/951.mp3     199.7  mood/theme---background
+
+================================================================================
+分析文件: autotagging_top50tags.tsv
+================================================================================
+
+字段列表: ['TRACK_ID', 'ARTIST_ID', 'ALBUM_ID', 'PATH', 'DURATION', 'TAGS']
+字段数量: 6
+
+是否包含歌曲名字: False
+是否包含歌手名字: False
+是否包含年份/日期字段: False
+
+总记录数: 11052
+
+Distinct Tags数量: 50
+Tag类别统计: {'genre': 10535, 'instrument': 434, 'mood/theme': 83}
+
+最常见的20个标签:
+  genre---electronic: 2396次
+  genre---rock: 1071次
+  genre---pop: 1009次
+  genre---hiphop: 812次
+  genre---reggae: 654次
+  genre---classical: 652次
+  genre---soundtrack: 568次
+  genre---metal: 362次
+  genre---folk: 323次
+  genre---ambient: 317次
+  genre---easylistening: 282次
+  genre---world: 239次
+  genre---jazz: 232次
+  genre---alternative: 202次
+  genre---techno: 185次
+  genre---experimental: 155次
+  genre---trance: 133次
+  genre---poprock: 128次
+  instrument---guitar: 126次
+  genre---funk: 125次
+
+数据示例（前3行）:
+        TRACK_ID      ARTIST_ID      ALBUM_ID        PATH  DURATION           TAGS
+0  track_0000215  artist_000014  album_000031  15/215.mp3     151.4  genre---metal
+1  track_0000216  artist_000014  album_000031  16/216.mp3     234.9  genre---metal
+2  track_0000219  artist_000014  album_000031  19/219.mp3     199.4  genre---metal
+
+================================================================================
+分析文件: raw.tsv
+================================================================================
+
+字段列表: ['TRACK_ID', 'ARTIST_ID', 'ALBUM_ID', 'PATH', 'DURATION', 'TAGS']
+字段数量: 6
+
+是否包含歌曲名字: False
+是否包含歌手名字: False
+是否包含年份/日期字段: False
+
+总记录数: 5133
+
+Distinct Tags数量: 127
+Tag类别统计: {'genre': 4959, 'mood/theme': 110, 'instrument': 64}
+
+最常见的20个标签:
+  genre---electronic: 1559次
+  genre---pop: 554次
+  genre---rock: 429次
+  genre---classical: 351次
+  genre---hiphop: 247次
+  genre---soundtrack: 240次
+  genre---reggae: 170次
+  genre---easylistening: 169次
+  genre---metal: 145次
+  genre---jazz: 124次
+  genre---ambient: 115次
+  genre---alternative: 102次
+  genre---punk: 49次
+  genre---poprock: 40次
+  mood/theme---dream: 38次
+  genre---popfolk: 35次
+  genre---techno: 32次
+  instrument---piano: 30次
+  genre---gothic: 29次
+  genre---hardrock: 27次
+
+数据示例（前3行）:
+        TRACK_ID      ARTIST_ID      ALBUM_ID        PATH  DURATION           TAGS
+0  track_0000214  artist_000014  album_000031  14/214.mp3     124.6   genre---punk
+1  track_0000215  artist_000014  album_000031  15/215.mp3     151.4  genre---metal
+2  track_0000216  artist_000014  album_000031  16/216.mp3     234.9  genre---metal
+
+================================================================================
+分析文件: raw_30s.tsv
+================================================================================
+
+字段列表: ['TRACK_ID', 'ARTIST_ID', 'ALBUM_ID', 'PATH', 'DURATION', 'TAGS']
+字段数量: 6
+
+是否包含歌曲名字: False
+是否包含歌手名字: False
+是否包含年份/日期字段: False
+
+总记录数: 5094
+
+Distinct Tags数量: 127
+Tag类别统计: {'genre': 4922, 'mood/theme': 108, 'instrument': 64}
+
+最常见的20个标签:
+  genre---electronic: 1556次
+  genre---pop: 541次
+  genre---rock: 427次
+  genre---classical: 350次
+  genre---hiphop: 245次
+  genre---soundtrack: 238次
+  genre---reggae: 170次
+  genre---easylistening: 168次
+  genre---metal: 145次
+  genre---jazz: 124次
+  genre---ambient: 113次
+  genre---alternative: 102次
+  genre---punk: 49次
+  genre---poprock: 40次
+  mood/theme---dream: 38次
+  genre---popfolk: 35次
+  genre---techno: 32次
+  instrument---piano: 30次
+  genre---gothic: 29次
+  genre---hardrock: 27次
+
+数据示例（前3行）:
+        TRACK_ID      ARTIST_ID      ALBUM_ID        PATH  DURATION           TAGS
+0  track_0000214  artist_000014  album_000031  14/214.mp3     124.6   genre---punk
+1  track_0000215  artist_000014  album_000031  15/215.mp3     151.4  genre---metal
+2  track_0000216  artist_000014  album_000031  16/216.mp3     234.9  genre---metal
+
+================================================================================
+分析文件: raw_30s_cleantags.tsv
+================================================================================
+
+字段列表: ['TRACK_ID', 'ARTIST_ID', 'ALBUM_ID', 'PATH', 'DURATION', 'TAGS']
+字段数量: 6
+
+是否包含歌曲名字: False
+是否包含歌手名字: False
+是否包含年份/日期字段: False
+
+总记录数: 5107
+
+Distinct Tags数量: 124
+Tag类别统计: {'genre': 4931, 'mood/theme': 111, 'instrument': 65}
+
+最常见的20个标签:
+  genre---electronic: 1558次
+  genre---pop: 541次
+  genre---rock: 427次
+  genre---classical: 350次
+  genre---hiphop: 245次
+  genre---soundtrack: 238次
+  genre---reggae: 170次
+  genre---easylistening: 168次
+  genre---metal: 145次
+  genre---jazz: 124次
+  genre---ambient: 113次
+  genre---alternative: 102次
+  genre---punkrock: 56次
+  genre---poprock: 40次
+  instrument---piano: 39次
+  mood/theme---dream: 38次
+  genre---popfolk: 35次
+  genre---techno: 32次
+  genre---gothic: 29次
+  genre---hardrock: 27次
+
+数据示例（前3行）:
+        TRACK_ID      ARTIST_ID      ALBUM_ID        PATH  DURATION              TAGS
+0  track_0000214  artist_000014  album_000031  14/214.mp3     124.6  genre---punkrock
+1  track_0000215  artist_000014  album_000031  15/215.mp3     151.4     genre---metal
+2  track_0000216  artist_000014  album_000031  16/216.mp3     234.9     genre---metal
+
+================================================================================
+分析文件: raw_30s_cleantags_50artists.tsv
+================================================================================
+
+字段列表: ['TRACK_ID', 'ARTIST_ID', 'ALBUM_ID', 'PATH', 'DURATION', 'TAGS']
+字段数量: 6
+
+是否包含歌曲名字: False
+是否包含歌手名字: False
+是否包含年份/日期字段: False
+
+总记录数: 6209
+
+Distinct Tags数量: 108
+Tag类别统计: {'genre': 5989, 'mood/theme': 123, 'instrument': 97}
+
+最常见的20个标签:
+  genre---electronic: 1656次
+  genre---pop: 575次
+  genre---reggae: 519次
+  genre---rock: 454次
+  genre---classical: 371次
+  genre---hiphop: 279次
+  genre---soundtrack: 274次
+  genre---metal: 211次
+  genre---easylistening: 173次
+  genre---jazz: 130次
+  genre---ambient: 123次
+  genre---alternative: 117次
+  genre---techno: 109次
+  genre---trance: 81次
+  genre---punkrock: 69次
+  genre---industrial: 53次
+  genre---poprock: 51次
+  genre---experimental: 46次
+  instrument---piano: 44次
+  mood/theme---dream: 38次
+
+数据示例（前3行）:
+        TRACK_ID      ARTIST_ID      ALBUM_ID        PATH  DURATION              TAGS
+0  track_0000214  artist_000014  album_000031  14/214.mp3     124.6  genre---punkrock
+1  track_0000215  artist_000014  album_000031  15/215.mp3     151.4     genre---metal
+2  track_0000216  artist_000014  album_000031  16/216.mp3     234.9     genre---metal
+
+================================================================================
+分析tag_map.json
+================================================================================
+Tag映射类别: ['genre', 'mood/theme', 'instrument']
+  genre: 27个映射
+  mood/theme: 31个映射
+  instrument: 41个映射
+
+================================================================================
+分析tags文件夹
+================================================================================
+
+文件: moodtheme_split.txt
+标签数量: 56
+前10个标签:
+  mood/theme---action
+  mood/theme---adventure
+  mood/theme---advertising
+  mood/theme---background
+  mood/theme---ballad
+  mood/theme---calm
+  mood/theme---children
+  mood/theme---christmas
+  mood/theme---commercial
+  mood/theme---cool
+
+文件: moodtheme.txt
+标签数量: 59
+前10个标签:
+  mood/theme---action
+  mood/theme---adventure
+  mood/theme---advertising
+  mood/theme---ambiental
+  mood/theme---background
+  mood/theme---ballad
+  mood/theme---calm
+  mood/theme---children
+  mood/theme---christmas
+  mood/theme---commercial
+
+文件: top50.txt
+标签数量: 50
+前10个标签:
+  genre---alternative
+  genre---ambient
+  genre---atmospheric
+  genre---chillout
+  genre---classical
+  genre---dance
+  genre---downtempo
+  genre---easylistening
+  genre---electronic
+  genre---experimental
+
+================================================================================
+总结报告
+================================================================================
+
+所有文件字段分析:
+
+文件: autotagging.tsv
+  字段: TRACK_ID, ARTIST_ID, ALBUM_ID, PATH, DURATION, TAGS
+  包含歌曲名字: False
+  包含歌手名字: False
+  包含年份字段: False
+  记录数: 6209
+  Distinct Tags数: 108
+
+文件: autotagging_genre.tsv
+  字段: TRACK_ID, ARTIST_ID, ALBUM_ID, PATH, DURATION, TAGS
+  包含歌曲名字: False
+  包含歌手名字: False
+  包含年份字段: False
+  记录数: 11721
+  Distinct Tags数: 90
+
+文件: autotagging_instrument.tsv
+  字段: TRACK_ID, ARTIST_ID, ALBUM_ID, PATH, DURATION, TAGS
+  包含歌曲名字: False
+  包含歌手名字: False
+  包含年份字段: False
+  记录数: 10839
+  Distinct Tags数: 41
+
+文件: autotagging_moodtheme.tsv
+  字段: TRACK_ID, ARTIST_ID, ALBUM_ID, PATH, DURATION, TAGS
+  包含歌曲名字: False
+  包含歌手名字: False
+  包含年份字段: False
+  记录数: 9947
+  Distinct Tags数: 59
+
+文件: autotagging_top50tags.tsv
+  字段: TRACK_ID, ARTIST_ID, ALBUM_ID, PATH, DURATION, TAGS
+  包含歌曲名字: False
+  包含歌手名字: False
+  包含年份字段: False
+  记录数: 11052
+  Distinct Tags数: 50
+
+文件: raw.tsv
+  字段: TRACK_ID, ARTIST_ID, ALBUM_ID, PATH, DURATION, TAGS
+  包含歌曲名字: False
+  包含歌手名字: False
+  包含年份字段: False
+  记录数: 5133
+  Distinct Tags数: 127
+
+文件: raw_30s.tsv
+  字段: TRACK_ID, ARTIST_ID, ALBUM_ID, PATH, DURATION, TAGS
+  包含歌曲名字: False
+  包含歌手名字: False
+  包含年份字段: False
+  记录数: 5094
+  Distinct Tags数: 127
+
+文件: raw_30s_cleantags.tsv
+  字段: TRACK_ID, ARTIST_ID, ALBUM_ID, PATH, DURATION, TAGS
+  包含歌曲名字: False
+  包含歌手名字: False
+  包含年份字段: False
+  记录数: 5107
+  Distinct Tags数: 124
+
+文件: raw_30s_cleantags_50artists.tsv
+  字段: TRACK_ID, ARTIST_ID, ALBUM_ID, PATH, DURATION, TAGS
+  包含歌曲名字: False
+  包含歌手名字: False
+  包含年份字段: False
+  记录数: 6209
+  Distinct Tags数: 108
+
+详细分析结果已保存到: /Users/jianqiaoji/Downloads/fffinalproto/data/analysis_report.json

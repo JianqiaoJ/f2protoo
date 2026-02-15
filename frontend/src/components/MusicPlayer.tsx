@@ -5,6 +5,7 @@ import { logListeningBehavior } from '../api/behavior';
 import { getCurrentUser, getUserStorageKey } from '../utils/storage';
 import { ChatMessage, aiAssistantApi } from '../api/aiAssistant';
 import { getDiversityRecommendation } from '../api/diversity';
+import { getRecommendations } from '../api/recommend';
 import { jamendoApi } from '../api';
 import { appendSystemLog } from '../api/logs';
 import { getRecommendWhy } from '../api/recommend';
@@ -51,6 +52,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
   const {
     currentTrack,
     isPlaying,
+    setIsPlaying,
     loading,
     error,
     togglePlayPause,
@@ -90,6 +92,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
   const quickSkipCountRef = useRef<number>(0); // 记录连续快速切换的次数
   const hasTriggeredQuickSkipTipRef = useRef<boolean>(false); // 记录是否已触发快速切换提示
   const [diversityTip, setDiversityTip] = useState<string | null>(null); // 多样性推荐提示气泡
+  const [diversityChoiceHandlers, setDiversityChoiceHandlers] = useState<{ onFamiliar: () => void; onExplore: () => void } | null>(null); // 多样性气泡的两个选项回调
   const hasTriggeredDiversityRef = useRef<boolean>(false); // 记录是否已触发多样性推荐
   const loadRandomTrackInProgressRef = useRef<boolean>(false); // 推荐下一首请求进行中时，仍可从待播列表播下一首
   const [bubbleQueueIndex, setBubbleQueueIndex] = useState(0); // 当前展示的气泡在队列中的下标，实现「一个加载完再加载下一个」
@@ -106,7 +109,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
   const { setCurrentTime: setStoreCurrentTime } = usePlayerStore();
 
   // 进度条气泡有序队列：同一时间只展示一个，当前气泡流式完成后再展示下一个
-  type BubbleItem = { key: string; text: string; type: 'recommendation' | 'whyThisTrack' | 'ratingFeedback' | 'oneMinute' | 'ninetyFive' | 'quickSkip' | 'diversity'; onClick?: () => void; onClose?: () => void; showCloseButton?: boolean };
+  type BubbleItem = { key: string; text: string; type: 'recommendation' | 'whyThisTrack' | 'ratingFeedback' | 'oneMinute' | 'ninetyFive' | 'quickSkip' | 'diversity'; onClick?: () => void; onClose?: () => void; showCloseButton?: boolean; diversityChoice?: { onFamiliar: () => void; onExplore: () => void } };
   const bubbleQueue = useMemo((): BubbleItem[] => {
     const list: BubbleItem[] = [];
     if (recommendationTip) list.push({ key: 'recommendation', text: recommendationTip, type: 'recommendation', onClick: onToggleAssistant });
@@ -115,9 +118,9 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
     if (oneMinuteFeedbackTip) list.push({ key: 'oneMinute', text: oneMinuteFeedbackTip.text, type: 'oneMinute', onClick: onToggleAssistant });
     if (ninetyFivePercentTip) list.push({ key: 'ninetyFive', text: ninetyFivePercentTip.text, type: 'ninetyFive', onClick: onToggleAssistant });
     if (quickSkipTip) list.push({ key: 'quickSkip', text: quickSkipTip, type: 'quickSkip', onClick: onToggleAssistant, onClose: () => setQuickSkipTip(null), showCloseButton: true });
-    if (diversityTip) list.push({ key: 'diversity', text: diversityTip, type: 'diversity', onClick: onToggleAssistant, onClose: () => setDiversityTip(null), showCloseButton: true });
+    if (diversityTip) list.push({ key: 'diversity', text: diversityTip, type: 'diversity', onClick: onToggleAssistant, onClose: () => { setDiversityTip(null); setDiversityChoiceHandlers(null); }, showCloseButton: true, diversityChoice: diversityChoiceHandlers ?? undefined });
     return list;
-  }, [recommendationTip, whyThisTrackTip, ratingFeedbackTip, oneMinuteFeedbackTip, ninetyFivePercentTip, quickSkipTip, diversityTip, onToggleAssistant]);
+  }, [recommendationTip, whyThisTrackTip, ratingFeedbackTip, oneMinuteFeedbackTip, ninetyFivePercentTip, quickSkipTip, diversityTip, diversityChoiceHandlers, onToggleAssistant]);
 
   const bubbleQueueLengthRef = useRef(0);
   bubbleQueueLengthRef.current = bubbleQueue.length;
@@ -139,7 +142,8 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
       setRatingFeedbackTip(null);
       setOneMinuteFeedbackTip(null);
       setNinetyFivePercentTip(null);
-      setDiversityTip(null); // 清除多样性推荐气泡
+      setDiversityTip(null);
+      setDiversityChoiceHandlers(null);
       lastRatingForFeedbackRef.current = null;
       hasTriggeredOneMinuteFeedbackRef.current = null;
       hasTriggeredNinetyFivePercentRef.current = null;
@@ -161,6 +165,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
       setNinetyFivePercentTip(null);
       setQuickSkipTip(null);
       setDiversityTip(null);
+      setDiversityChoiceHandlers(null);
     }
   }, [isAssistantVisible]);
 
@@ -317,6 +322,12 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
         setCurrentTime(audio.currentTime);
         setStoreCurrentTime(audio.currentTime); // 同步到store
       }
+      // 播放中：待播列表剩余 ≤2 首（含下一首）时在列表下方补充新推荐
+      const { recommendedTrackIds: ids, recommendedTrackIndex: idx, preloadNextRecommendationsIfNeeded } = usePlayerStore.getState();
+      const remaining = ids.length - idx; // 剩余首数（含下一首）
+      if (remaining <= 2 && ids.length > 0) {
+        preloadNextRecommendationsIfNeeded();
+      }
     };
 
     audio.addEventListener('timeupdate', updateProgress);
@@ -437,20 +448,12 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
       }
     }
     
-    // 检查匹配的情绪
-    if (track.tags.moods && track.tags.moods.length > 0 && userPrefs.moods.length > 0) {
-      const matchedMoods = track.tags.moods.filter(m => userPrefs.moods.includes(m));
-      if (matchedMoods.length > 0) {
-        matchedTags.push(`情绪${matchedMoods.join('、')}`);
-      }
-    }
-    
-    // 检查匹配的主题
-    if (track.tags.themes && track.tags.themes.length > 0 && userPrefs.themes.length > 0) {
-      const matchedThemes = track.tags.themes.filter(t => userPrefs.themes.includes(t));
-      if (matchedThemes.length > 0) {
-        matchedTags.push(`主题${matchedThemes.join('、')}`);
-      }
+    // 情绪与主题合并为一类，去重后只展示一次（同一 tag 不说两遍）
+    const matchedMoods = (track.tags.moods && userPrefs.moods.length > 0) ? track.tags.moods.filter(m => userPrefs.moods.includes(m)) : [];
+    const matchedThemes = (track.tags.themes && userPrefs.themes.length > 0) ? track.tags.themes.filter(t => userPrefs.themes.includes(t)) : [];
+    const moodThemeTags = [...new Set([...matchedMoods, ...matchedThemes])];
+    if (moodThemeTags.length > 0) {
+      matchedTags.push(`情绪·主题${moodThemeTags.join('、')}`);
     }
     
     if (matchedTags.length === 0) return null;
@@ -558,7 +561,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
 
   const handleNext = async () => {
     console.log('handleNext 被调用:', { currentTrack: !!currentTrack, currentRating, loading });
-    
+
     if (!currentTrack) {
       console.warn('handleNext: 没有当前歌曲');
       return;
@@ -575,7 +578,8 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
     }
     console.log('handleNext: 开始推荐下一首，currentRating =', currentRating, 'hasMoreInList =', hasMoreInList);
     appendSystemLog(`[推荐] 开始推荐下一首，currentRating=${currentRating}，hasMoreInList=${hasMoreInList}`);
-    
+    setIsPlaying(false);
+
     // 保存当前歌曲的历史记录
     if (currentTrack && playStartTimeRef.current > 0) {
       const playDuration = Math.floor((Date.now() - playStartTimeRef.current) / 1000);
@@ -670,12 +674,51 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
                 tags: diversityTrack.tags,
               });
               
-              // 如果Seren未展开，显示气泡；如果已展开，直接添加到聊天记录
+              // 如果Seren未展开，显示气泡（含「继续听我熟悉的风格」「探索新领域」两个选项）；如果已展开，直接添加到聊天记录
               if (!isAssistantVisible) {
                 setDiversityTip(introduction);
+                setDiversityChoiceHandlers({
+                  onFamiliar: () => {
+                    setDiversityTip(null);
+                    setDiversityChoiceHandlers(null);
+                    const username = getCurrentUser();
+                    if (!username) return;
+                    const { setLoading, setCurrentTrack, setIsPlaying, getUserPreferences, currentSystem } = usePlayerStore.getState();
+                    setLoading(true);
+                    getRecommendations({
+                      username,
+                      systemType: currentSystem,
+                      explicitPreferences: getUserPreferences(),
+                      count: 1,
+                      trigger: 'playlist_finished',
+                    })
+                      .then(async (result) => {
+                        const trackId = result.recommendedTracks?.[0];
+                        if (trackId) {
+                          const track = await jamendoApi.getTrackById(trackId);
+                          if (track) {
+                            setCurrentTrack(track);
+                            setIsPlaying(true);
+                            appendSystemLog('[推荐] 多样性选择「继续听我熟悉的风格」：已随机推荐一首并播放');
+                          }
+                        }
+                      })
+                      .catch((e) => {
+                        appendSystemLog(`[推荐] 随机推荐失败: ${e instanceof Error ? e.message : String(e)}`);
+                      })
+                      .finally(() => usePlayerStore.getState().setLoading(false));
+                  },
+                  onExplore: async () => {
+                    setDiversityTip(null);
+                    setDiversityChoiceHandlers(null);
+                    const ok = await usePlayerStore.getState().playNextFromList();
+                    if (ok) appendSystemLog('[推荐] 多样性选择「探索新领域」：继续播放待播列表');
+                  },
+                });
                 // 气泡显示10秒后自动隐藏
                 setTimeout(() => {
                   setDiversityTip(null);
+                  setDiversityChoiceHandlers(null);
                 }, 10000);
               } else {
                 // Seren已展开，直接添加到聊天记录（LLM 产出，标记 Seren）
@@ -914,9 +957,9 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
             </span>
           </button>
         )}
-        {/* 黑胶封面占位符 */}
-        <div className="mb-8">
-          <div className="w-80 h-80 rounded-full bg-gradient-to-br from-gray-200 to-gray-300 flex items-center justify-center shadow-2xl relative overflow-hidden">
+        {/* 黑胶封面占位符 - 与有歌时同宽、居中 */}
+        <div className="mb-8 flex justify-center w-full">
+          <div className="w-80 h-80 rounded-full bg-gradient-to-br from-gray-200 to-gray-300 flex items-center justify-center shadow-2xl relative overflow-hidden flex-shrink-0">
             {/* 黑胶中心圆 */}
             <div className="w-24 h-24 rounded-full bg-gray-300 z-10 border-4 border-gray-400"></div>
             {/* 黑胶纹理 */}
@@ -979,7 +1022,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
         </button>
       )}
       {/* 专辑 + 音乐信息区域（加载时仅显示骨架屏，不保留原专辑） */}
-      <div className="relative mb-6">
+      <div className="relative mb-6 flex flex-col items-center w-full">
         {loading && currentTrack ? (
           /* 正在为您加速推荐：仅骨架屏 + 旋转圆环与文案，不渲染原专辑 */
           <div className="flex flex-col items-center pt-8 pb-8">
@@ -993,23 +1036,25 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
           </div>
         ) : (
           <>
-            {/* Album Art - 双击展开/隐藏下方 tag */}
+            {/* Album Art - 永远居中、固定比例，避免歪斜；双击展开/隐藏下方 tag */}
             <div
-              className="mb-8 cursor-pointer select-none"
+              className="mb-8 cursor-pointer select-none flex justify-center items-center w-full"
               onDoubleClick={() => setShowTags((s) => !s)}
-              title={showTags ? '双击隐藏标签' : '双击显示标签'}
+              title={showTags ? '双击隐藏标签与待播位置' : '双击显示标签与待播位置'}
             >
-              {currentTrack.image ? (
-                <img
-                  src={currentTrack.image}
-                  alt={currentTrack.album_name}
-                  className="w-80 h-80 rounded-2xl shadow-2xl object-cover object-center"
-                />
-              ) : (
-                <div className="w-80 h-80 rounded-2xl shadow-2xl bg-gray-300 flex items-center justify-center">
-                  <span className="text-gray-500 text-xl">无封面</span>
-                </div>
-              )}
+              <div className="w-80 h-80 rounded-2xl shadow-2xl overflow-hidden flex-shrink-0 bg-gray-300">
+                {currentTrack.image ? (
+                  <img
+                    src={currentTrack.image}
+                    alt={currentTrack.album_name}
+                    className="w-full h-full object-cover object-center"
+                  />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center">
+                    <span className="text-gray-500 text-xl">无封面</span>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Song Info */}
@@ -1024,10 +1069,15 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
                 )}
               </p>
         
-              {/* Tags - 默认隐藏，双击封面展开/隐藏 */}
+              {/* Tags 与待播位置 - 默认隐藏，双击封面展开/隐藏 */}
               {showTags && (
               <div className="flex flex-col items-center gap-3 mt-4 max-w-2xl">
                 <p className="text-xs text-gray-500 font-mono">track_id: {currentTrack.id}</p>
+                {recommendedTrackIds.length > 0 && (
+                  <p className="text-xs text-gray-500">
+                    待播列表：第 {recommendedTrackIndex + 1} 首 / 共 {recommendedTrackIds.length} 首
+                  </p>
+                )}
                 {currentTrack.tags && (
               <>
                 {/* 风格：去重后展示 */}
@@ -1109,7 +1159,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
             >
               {(item.showCloseButton && item.onClose) ? (
                 <div className="flex items-start gap-2">
-                  <div className="flex-1">
+                  <div className="flex-1 min-w-0">
                     <StreamingText
                       text={item.text}
                       onComplete={() => {
@@ -1118,6 +1168,32 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
                         }, 3000);
                       }}
                     />
+                    {item.type === 'diversity' && item.diversityChoice && (
+                      <div className="flex flex-wrap gap-2 mt-2" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            item.diversityChoice!.onFamiliar();
+                            item.onClose?.();
+                          }}
+                          className="px-2 py-1 text-xs rounded border border-white/80 text-white bg-white/10 hover:bg-white/20 transition-colors"
+                        >
+                          继续听我熟悉的风格
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            item.diversityChoice!.onExplore();
+                            item.onClose?.();
+                          }}
+                          className="px-2 py-1 text-xs rounded border border-white/80 text-white bg-white/10 hover:bg-white/20 transition-colors"
+                        >
+                          探索新领域
+                        </button>
+                      </div>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -1126,7 +1202,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
                       item.onClose?.();
                       if (item.onClick) item.onClick();
                     }}
-                    className="text-white/80 hover:text-white transition-colors"
+                    className="text-white/80 hover:text-white transition-colors shrink-0"
                   >
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />

@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import { usePlayerStore } from '../store';
-import { FavoriteTrack, HistoryRecord } from '../types';
+import { FavoriteTrack, HistoryRecord, type TrackTags } from '../types';
 import { jamendoApi } from '../api';
 import { fetchLogsFromServer } from '../api/logs';
 
 export default function FavoritesList() {
-  const { favorites, history, setCurrentTrack, setIsPlaying, removeFavorite, recommendedTrackIds, recommendedTrackScores, currentTrack, getRating } = usePlayerStore();
+  const { favorites, history, setCurrentTrack, setIsPlaying, removeFavorite, recommendedTrackIds, recommendedTrackReasons, recommendedTrackScores, recommendedTrackRequestedAt, recommendedTrackDetails, currentTrack, getRating } = usePlayerStore();
   const [activeTab, setActiveTab] = useState<'favorites' | 'history' | 'playlist' | 'log'>('favorites');
   /** 默认不展示待播列表；双击历史记录 tab 展开/收起 */
   const [showPlaylistTab, setShowPlaylistTab] = useState(false);
@@ -14,8 +14,8 @@ export default function FavoritesList() {
   const logContentRef = useRef<HTMLDivElement>(null);
   const [hoveredTrackId, setHoveredTrackId] = useState<string | null>(null);
   const [mousePosition, setMousePosition] = useState<{ x: number; y: number } | null>(null);
-  // 待播列表曲目详情（id -> { name, artist_name, image }），用于展示
-  const [playlistDetails, setPlaylistDetails] = useState<Record<string, { name: string; artist_name: string; image?: string }>>({});
+  // 待播列表曲目详情（id -> { name, artist_name, image?, tags? }），用于展示
+  const [playlistDetails, setPlaylistDetails] = useState<Record<string, { name: string; artist_name: string; image?: string; tags?: TrackTags }>>({});
   const [playlistLoading, setPlaylistLoading] = useState(false);
   /** 日志 tab：从 GET /api/logs 拉取的全文，与该页面返回内容一致 */
   const [apiLogContent, setApiLogContent] = useState('');
@@ -31,9 +31,9 @@ export default function FavoritesList() {
     const ids = recommendedTrackIds.slice(0, limit);
     Promise.all(ids.map((id) => jamendoApi.getTrackById(id).catch(() => null)))
       .then((tracks) => {
-        const next: Record<string, { name: string; artist_name: string; image?: string }> = {};
+        const next: Record<string, { name: string; artist_name: string; image?: string; tags?: TrackTags }> = {};
         tracks.forEach((t, i) => {
-          if (t && ids[i]) next[ids[i]] = { name: t.name, artist_name: t.artist_name, image: t.image };
+          if (t && ids[i]) next[ids[i]] = { name: t.name, artist_name: t.artist_name, image: t.image, tags: t.tags };
         });
         setPlaylistDetails(next);
       })
@@ -85,6 +85,23 @@ export default function FavoritesList() {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  /** 将曲目标签格式化为一行：风格 / 乐器 / 情绪 / 主题 */
+  const formatTags = (tags: TrackTags | undefined): string => {
+    if (!tags) return '—';
+    const parts: string[] = [];
+    if (tags.genres?.length) parts.push(`风格: ${tags.genres.slice(0, 3).join('、')}`);
+    if (tags.instruments?.length) parts.push(`乐器: ${tags.instruments.slice(0, 3).join('、')}`);
+    if (tags.moods?.length) parts.push(`情绪: ${tags.moods.slice(0, 3).join('、')}`);
+    if (tags.themes?.length) parts.push(`主题: ${tags.themes.slice(0, 3).join('、')}`);
+    return parts.length ? parts.join('；') : '—';
+  };
+
+  /** 被请求时间展示：时间戳 -> 可读时间 */
+  const formatRequestedAt = (ts: number | undefined): string => {
+    if (ts == null || !Number.isFinite(ts)) return '—';
+    return new Date(ts).toLocaleString('zh-CN', { dateStyle: 'short', timeStyle: 'short' });
   };
 
   const handleRemoveFavorite = (trackId: string, e: React.MouseEvent) => {
@@ -163,10 +180,14 @@ export default function FavoritesList() {
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
         {activeTab === 'playlist' ? (
-          /* 待播列表：只显示下一首及之后，已播完的不展示，第一首永远是即将播放 */
+          /* 待播列表：顺序与马上要播一致，只显示下一首及之后；每首旁显示请求原因 */
           (() => {
             const currentIndex = currentTrack ? recommendedTrackIds.indexOf(currentTrack.id) : -1;
             const visibleTrackIds = currentIndex >= 0 ? recommendedTrackIds.slice(currentIndex + 1) : recommendedTrackIds;
+            const visibleReasons = visibleTrackIds.map((id) => {
+              const idx = recommendedTrackIds.indexOf(id);
+              return idx >= 0 && idx < recommendedTrackReasons.length ? recommendedTrackReasons[idx] : '';
+            });
             if (visibleTrackIds.length === 0) {
               return (
                 <div className="flex items-center justify-center h-full text-gray-400">
@@ -183,10 +204,14 @@ export default function FavoritesList() {
             }
             return (
             <div className="space-y-3">
+              <p className="text-xs text-gray-500 mb-2">以下顺序即播放顺序</p>
               {visibleTrackIds.map((trackId, index) => {
                 const detail = playlistDetails[trackId];
                 const isNext = index === 0;
                 const score = recommendedTrackScores[trackId];
+                const reason = visibleReasons[index];
+                const tags = recommendedTrackDetails[trackId]?.tags ?? detail?.tags;
+                const requestedAt = recommendedTrackRequestedAt[trackId];
                 return (
                   <div
                     key={`${trackId}-${index}`}
@@ -229,6 +254,11 @@ export default function FavoritesList() {
                       <h3 className="font-medium text-gray-800 truncate">{detail?.name ?? `ID: ${trackId}`}</h3>
                       <p className="text-sm text-gray-600 truncate">{detail?.artist_name ?? '加载中...'}</p>
                       {isNext && <span className="text-xs text-orange-500 mt-0.5">下一首</span>}
+                      {reason && (
+                        <p className="text-xs text-gray-500 mt-0.5" title={reason}>请求原因: {reason}</p>
+                      )}
+                      <p className="text-xs text-gray-500 mt-0.5" title={formatTags(tags)}>标签: {formatTags(tags)}</p>
+                      <p className="text-xs text-gray-500 mt-0.5">被请求时间: {formatRequestedAt(requestedAt)}</p>
                       <div className="flex items-center gap-1 mt-1">
                         {[1, 2, 3, 4, 5].map((star) => (
                           <svg

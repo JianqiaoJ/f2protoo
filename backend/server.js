@@ -1,9 +1,16 @@
 import express from 'express';
 import cors from 'cors';
 import initSqlJs from 'sql.js';
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+
+const DEBUG_LOG_PATH = join(dirname(fileURLToPath(import.meta.url)), '../../.cursor/debug.log');
+function debugLog(payload) {
+  try {
+    appendFileSync(DEBUG_LOG_PATH, JSON.stringify({ ...payload, timestamp: Date.now() }) + '\n');
+  } catch (_) {}
+}
 import { generateRecommendations, getTrackTagsMap, getTrackRecommendationReason, getTrackRecommendationReasonFromTags, getCombinedPreferences, getTrackTagsByAnyId } from './recommender.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,26 +72,26 @@ const dbPath = join(__dirname, 'users.db');
 
 // 初始用户（与 init-db.js 一致），用于新建库插入、已有库补全缺失用户
 const INITIAL_USERS = [
-  { username: 'user1', password: '12' },
-  { username: 'user2', password: '24' },
-  { username: 'user3', password: '36' },
-  { username: 'user4', password: '48' },
-  { username: 'user5', password: '510' },
-  { username: 'user6', password: '612' },
-  { username: 'user7', password: '714' },
-  { username: 'user8', password: '816' },
-  { username: 'user9', password: '918' },
-  { username: 'user10', password: '1020' },
-  { username: 'user1_LLM', password: '12' },
-  { username: 'user2_LLM', password: '24' },
-  { username: 'user3_LLM', password: '36' },
-  { username: 'user4_LLM', password: '48' },
-  { username: 'user5_LLM', password: '510' },
-  { username: 'user6_LLM', password: '612' },
-  { username: 'user7_LLM', password: '714' },
-  { username: 'user8_LLM', password: '816' },
-  { username: 'user9_LLM', password: '918' },
-  { username: 'user10_LLM', password: '1020' },
+  { username: 'user11', password: '1122' },
+  { username: 'user11_LLM', password: '1122' },
+  { username: 'user12', password: '1224' },
+  { username: 'user12_LLM', password: '1224' },
+  { username: 'user13', password: '1326' },
+  { username: 'user13_LLM', password: '1326' },
+  { username: 'user14', password: '1428' },
+  { username: 'user14_LLM', password: '1428' },
+  { username: 'user15', password: '1130' },
+  { username: 'user15_LLM', password: '1130' },
+  { username: 'user16', password: '1632' },
+  { username: 'user16_LLM', password: '1632' },
+  { username: 'user17', password: '1734' },
+  { username: 'user17_LLM', password: '1734' },
+  { username: 'user18', password: '1836' },
+  { username: 'user18_LLM', password: '1836' },
+  { username: 'user19', password: '1938' },
+  { username: 'user19_LLM', password: '1938' },
+  { username: 'user20', password: '2040' },
+  { username: 'user20_LLM', password: '2040' },
 ];
 
 function ensureInitialUsers() {
@@ -448,8 +455,9 @@ function saveDatabase() {
 // 初始化数据库连接，完成后再启动服务
 loadDatabase()
   .then(() => {
-    app.listen(PORT, () => {
-      console.log(`服务器运行在 http://localhost:${PORT}`);
+    const HOST = process.env.HOST || '0.0.0.0';
+    app.listen(PORT, HOST, () => {
+      console.log(`服务器运行在 http://${HOST}:${PORT}`);
       console.log(`数据库文件位置: ${dbPath}`);
       console.log('系统日志：此处输出会同步到前端的「系统日志」tab');
     });
@@ -591,7 +599,6 @@ app.post('/api/behavior/log', (req, res) => {
     stmt.free();
     saveDatabase();
 
-    console.log(`[行为] ${username} | ${track_name} | ${track_id} | ${listen_duration || 0}s | 已落库`);
     res.json({
       success: true,
       message: '行为记录成功'
@@ -602,7 +609,7 @@ app.post('/api/behavior/log', (req, res) => {
   }
 });
 
-// 保存用户偏好
+// 保存用户偏好：每次偏好更新都必须同时写入 user_preferences（当前快照）与 user_preference_updates（变更记录）
 app.post('/api/preferences/save', (req, res) => {
   const { username, system_type: systemType, preferences, operation, conversation_content: conversationContent } = req.body;
   const sys = (systemType === 'B' ? 'B' : 'A');
@@ -630,33 +637,47 @@ app.post('/api/preferences/save', (req, res) => {
       const obj = typeof w === 'object' && w !== null ? w : {};
       return tags.map(t => (obj[t] != null ? `${t}(${Number(obj[t])})` : t)).join(', ');
     };
+    const formatCategoryForLog = (label, tags, w) => {
+      const s = formatTagsWithWeights(Array.isArray(tags) ? tags : [], w || {});
+      return s ? `  ${label}: ${s}` : null;
+    };
 
-    // 输出日志（含权重）
-    console.log('\n📝 ========== 用户偏好更新 ==========');
-    console.log(`🕐 时间: ${getTimestamp()}`);
-    console.log(`👤 用户: ${username}`);
-    console.log(`📊 偏好更新（tag 与权重）:`);
-    if (preferences.genres && preferences.genres.length > 0) {
-      console.log(`   风格: ${formatTagsWithWeights(preferences.genres, weights.genres)}`);
-    }
-    if (preferences.instruments && preferences.instruments.length > 0) {
-      console.log(`   乐器: ${formatTagsWithWeights(preferences.instruments, weights.instruments)}`);
-    }
-    if (preferences.moods && preferences.moods.length > 0) {
-      console.log(`   情绪: ${formatTagsWithWeights(preferences.moods, weights.moods)}`);
-    }
-    if (preferences.themes && preferences.themes.length > 0) {
-      console.log(`   主题: ${formatTagsWithWeights(preferences.themes, weights.themes)}`);
-    }
-
-    // 读取当前偏好（用于记录更新前后差异）
+    // 每次偏好更新都需同时更新 DB 两表：先写 user_preference_updates（变更记录），再写 user_preferences（当前快照）
+    // 读取当前偏好（用于记录更新前后差异并写 user_preference_updates）
     let oldRow = null;
-    const selectStmt = db.prepare('SELECT genres, instruments, moods, themes FROM user_preferences WHERE username = ? AND system_type = ?');
+    const selectStmt = db.prepare('SELECT genres, instruments, moods, themes, genres_weights, instruments_weights, moods_weights, themes_weights FROM user_preferences WHERE username = ? AND system_type = ?');
     selectStmt.bind([username, sys]);
     if (selectStmt.step()) {
       oldRow = selectStmt.getAsObject();
     }
     selectStmt.free();
+
+    // Terminal 日志：用户偏好更新，明确展示更新前 / 更新后（tag 增减与权重）
+    const oldGenres = oldRow ? (JSON.parse(oldRow.genres || '[]')) : [];
+    const oldInstruments = oldRow ? (JSON.parse(oldRow.instruments || '[]')) : [];
+    const oldMoods = oldRow ? (JSON.parse(oldRow.moods || '[]')) : [];
+    const oldThemes = oldRow ? (JSON.parse(oldRow.themes || '[]')) : [];
+    const oldW = {
+      genres: oldRow && oldRow.genres_weights ? (typeof oldRow.genres_weights === 'string' ? JSON.parse(oldRow.genres_weights) : oldRow.genres_weights) : {},
+      instruments: oldRow && oldRow.instruments_weights ? (typeof oldRow.instruments_weights === 'string' ? JSON.parse(oldRow.instruments_weights) : oldRow.instruments_weights) : {},
+      moods: oldRow && oldRow.moods_weights ? (typeof oldRow.moods_weights === 'string' ? JSON.parse(oldRow.moods_weights) : oldRow.moods_weights) : {},
+      themes: oldRow && oldRow.themes_weights ? (typeof oldRow.themes_weights === 'string' ? JSON.parse(oldRow.themes_weights) : oldRow.themes_weights) : {},
+    };
+    const newGenresArr = preferences.genres || [];
+    const newInstrumentsArr = preferences.instruments || [];
+    const newMoodsArr = preferences.moods || [];
+    const newThemesArr = preferences.themes || [];
+    const reasonLabel = PREFERENCE_UPDATE_REASON_LABELS[op] || op || '未指定';
+    console.log('\n📝 ========== 用户偏好更新 ==========');
+    console.log(`🕐 时间: ${getTimestamp()}`);
+    console.log(`👤 用户: ${username} (系统: ${sys}) | 更新原因: ${reasonLabel}`);
+    console.log('📤 更新前:');
+    [formatCategoryForLog('风格', oldGenres, oldW.genres), formatCategoryForLog('乐器', oldInstruments, oldW.instruments), formatCategoryForLog('情绪', oldMoods, oldW.moods), formatCategoryForLog('主题', oldThemes, oldW.themes)].forEach(line => { if (line) console.log(line); });
+    if (!oldGenres.length && !oldInstruments.length && !oldMoods.length && !oldThemes.length) console.log('  (无)');
+    console.log('📥 更新后:');
+    [formatCategoryForLog('风格', newGenresArr, weights.genres), formatCategoryForLog('乐器', newInstrumentsArr, weights.instruments), formatCategoryForLog('情绪', newMoodsArr, weights.moods), formatCategoryForLog('主题', newThemesArr, weights.themes)].forEach(line => { if (line) console.log(line); });
+    if (!newGenresArr.length && !newInstrumentsArr.length && !newMoodsArr.length && !newThemesArr.length) console.log('  (无)');
+    if (conversation_content) console.log(`💬 会话摘要: ${conversation_content.slice(0, 80)}${conversation_content.length > 80 ? '...' : ''}`);
 
     const newGenres = JSON.stringify(preferences.genres || []);
     const newInstruments = JSON.stringify(preferences.instruments || []);
@@ -667,10 +688,10 @@ app.post('/api/preferences/save', (req, res) => {
     const newMoodsWeights = JSON.stringify(weights.moods);
     const newThemesWeights = JSON.stringify(weights.themes);
 
-    // 对每个有变化的分类写入一条更新记录
+    // 对每个有变化的分类写入一条更新记录（显式写入 updated_at / updated_at_timestamp，确保生效）
     const logStmt = db.prepare(`
-      INSERT INTO user_preference_updates (username, system_type, tag_category, old_tags, new_tags, operation, conversation_content)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO user_preference_updates (username, system_type, tag_category, old_tags, new_tags, operation, conversation_content, updated_at, updated_at_timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ` + DB_NOW + `, ` + DB_UNIX + `)
     `);
     const categories = [
       ['genres', newGenres],
@@ -838,16 +859,65 @@ app.post('/api/user/clear-all', (req, res) => {
   try {
     const emptyJson = '[]';
     const emptyWeights = '{}';
-    // 1. 清空 user_preferences（同 preferences/clear）
+    const CLEAR_OPERATION = '清除数据';
+
+    // 1. 读取当前偏好（用于写入 user_preference_updates），再清空 user_preferences
+    const selectPref = db.prepare('SELECT system_type, genres, instruments, moods, themes FROM user_preferences WHERE username = ?');
+    selectPref.bind([username]);
+    const oldPrefsBySys = {};
+    while (selectPref.step()) {
+      const row = selectPref.getAsObject();
+      const sys = row.system_type === 'B' ? 'B' : 'A';
+      oldPrefsBySys[sys] = {
+        genres: row.genres || '[]',
+        instruments: row.instruments || '[]',
+        moods: row.moods || '[]',
+        themes: row.themes || '[]',
+      };
+    }
+    selectPref.free();
+
+    // Terminal 日志：用户偏好更新（清除），更新前 / 更新后
+    console.log('\n📝 ========== 用户偏好更新（清除数据） ==========');
+    console.log(`🕐 时间: ${getTimestamp()}`);
+    console.log(`👤 用户: ${username}`);
+    for (const sys of ['A', 'B']) {
+      const old = oldPrefsBySys[sys] || { genres: '[]', instruments: '[]', moods: '[]', themes: '[]' };
+      const hasAny = [old.genres, old.instruments, old.moods, old.themes].some(s => s && s !== '[]');
+      if (hasAny) {
+        console.log(`📤 更新前 (系统 ${sys}): 风格 ${old.genres || '[]'}, 乐器 ${old.instruments || '[]'}, 情绪 ${old.moods || '[]'}, 主题 ${old.themes || '[]'}`);
+      }
+    }
+    console.log('📥 更新后: (无)');
+    console.log('===================================\n');
+
     const delPref = db.prepare('DELETE FROM user_preferences WHERE username = ?');
     delPref.run([username]);
     delPref.free();
+
     const insertPref = db.prepare(`
       INSERT INTO user_preferences (username, system_type, genres, instruments, moods, themes, genres_weights, instruments_weights, moods_weights, themes_weights, updated_at, updated_at_timestamp, created_at, created_at_timestamp)
-      VALUES (?, 'A', ?, ?, ?, ?, ?, ?, ?, ?, ` + DB_NOW + `, ` + DB_UNIX + `, ` + DB_NOW + `, ` + DB_UNIX + `)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ` + DB_NOW + `, ` + DB_UNIX + `, ` + DB_NOW + `, ` + DB_UNIX + `)
     `);
-    insertPref.run([username, emptyJson, emptyJson, emptyJson, emptyJson, emptyWeights, emptyWeights, emptyWeights, emptyWeights]);
+    for (const sys of ['A', 'B']) {
+      insertPref.run([username, sys, emptyJson, emptyJson, emptyJson, emptyJson, emptyWeights, emptyWeights, emptyWeights, emptyWeights]);
+    }
     insertPref.free();
+
+    // 写入 user_preference_updates：记录变空，并标记为清除数据导致（显式写入时间戳）
+    const logStmt = db.prepare(`
+      INSERT INTO user_preference_updates (username, system_type, tag_category, old_tags, new_tags, operation, conversation_content, updated_at, updated_at_timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ` + DB_NOW + `, ` + DB_UNIX + `)
+    `);
+    for (const sys of ['A', 'B']) {
+      const old = oldPrefsBySys[sys] || { genres: '[]', instruments: '[]', moods: '[]', themes: '[]' };
+      for (const cat of ['genres', 'instruments', 'moods', 'themes']) {
+        const oldTags = old[cat] || '[]';
+        logStmt.run([username, sys, cat, oldTags, emptyJson, CLEAR_OPERATION, null]);
+      }
+    }
+    logStmt.free();
+
     // 2. 清空对话历史（LLM 不再有该用户过往对话上下文）
     const delConv = db.prepare('DELETE FROM user_conversations WHERE username = ?');
     delConv.run([username]);
@@ -862,6 +932,9 @@ app.post('/api/user/clear-all', (req, res) => {
     delRec.free();
     saveDatabase();
     console.log(`✅ 已清除用户全部数据（冷启动）: ${username}`);
+    // #region agent log
+    debugLog({ location: 'server.js:clear-all', message: 'clear-all_done', data: { username }, hypothesisId: 'H1' });
+    // #endregion
     res.json({ success: true, message: '已清除偏好、对话、听歌行为与已推荐记录，已回到冷启动' });
   } catch (error) {
     console.error('清除用户全部数据失败:', error);
@@ -1216,19 +1289,35 @@ app.post('/api/playlist', (req, res) => {
 const TRIGGER_LABELS = {
   user_expressed_preference: '用户主动表达喜好',
   user_dislike_remove: '用户表达讨厌并移除 tag',
-  preferences_updated: '用户偏好已更新（可能因收藏、评分、听歌时长等）',
+  preferences_updated: '用户偏好已更新',
+  preload_next_batch: '待播列表剩余不多，预拉下一批',
   playlist_finished: '当前播放列表播放完毕',
+  user_request_rerecommend: '用户请求重新推荐/换一批',
+};
+
+// 用户偏好更新原因（operation）-> 终端日志明确展示：收藏、评分高、听歌完播、用户主动表达喜欢、用户主动表达厌恶 等
+const PREFERENCE_UPDATE_REASON_LABELS = {
+  favorite: '收藏',
+  rating_confirm: '评分高',
+  ninety_five_confirm: '听歌完播',
+  one_minute_confirm: '听满1分钟',
+  conversation: '用户主动表达喜欢',
+  dislike_remove: '用户主动表达厌恶',
+  first_login: '冷启动',
+  conflict_confirm: '说的不对后确认',
+  unknown: '未指定',
 };
 
 // 推荐歌曲接口（按系统 A/B 维度，推荐算法一致）
 app.post('/api/recommend', async (req, res) => {
-  const { username, systemType: reqSystemType, currentTrackId, explicitPreferences, count = 3, trigger, excludedTags, current_playlist: currentPlaylist } = req.body;
+  const { username, systemType: reqSystemType, currentTrackId, explicitPreferences, count = 3, trigger, excludedTags, current_playlist: currentPlaylist, preferenceUpdateReason } = req.body;
   const systemType = reqSystemType === 'B' ? 'B' : 'A';
 
   if (!username) {
     return res.status(400).json({ success: false, message: '用户名不能为空' });
   }
 
+  const recommendStartMs = Date.now();
   try {
     const hasExplicit = explicitPreferences && (
       (explicitPreferences.genres?.length > 0) || (explicitPreferences.instruments?.length > 0) ||
@@ -1277,8 +1366,15 @@ app.post('/api/recommend', async (req, res) => {
         };
     
     // 输出日志到终端（当前歌曲信息改为后台获取，不阻塞响应）
-    console.log('\n🎵 ========== 推荐请求 ==========');
-    console.log(`📌 触发原因: ${TRIGGER_LABELS[trigger] || trigger || '未指定'}`);
+    let triggerLabel = TRIGGER_LABELS[trigger] || trigger || '未指定';
+    if (trigger === 'preferences_updated' && preferenceUpdateReason) {
+      const reasonLabel = PREFERENCE_UPDATE_REASON_LABELS[preferenceUpdateReason] || preferenceUpdateReason;
+      triggerLabel = `用户偏好已更新（原因：${reasonLabel}）`;
+    }
+    console.log('\n' + '='.repeat(60));
+    console.log('🎵 推荐请求');
+    console.log('【请求原因】' + triggerLabel);
+    console.log('='.repeat(60));
     console.log(`🕐 时间: ${getTimestamp()}`);
     console.log(`👤 用户: ${username}`);
     if (currentTrackId) {
@@ -1348,11 +1444,14 @@ app.post('/api/recommend', async (req, res) => {
       console.log(`   (无偏好，将使用冷启动策略)`);
     }
     
-    // 仅冷启动阶段不掺入行为历史；其余情况（含传入显式偏好）均参与行为历史
+    // 仅冷启动阶段不掺入行为历史；其余情况（含传入显式偏好）均参与行为历史；清空记录后行为历史与已推荐数均为 0
     const behaviorForRecommend = isColdStart ? [] : behaviorHistory;
-    const alreadyRecommendedIds = getRecommendedTrackIds(username);
-    console.log(`📈 行为历史记录数: ${behaviorHistory.length}${isColdStart ? ' (冷启动，仅用显式偏好，不参与)' : ''}`);
-    console.log(`📋 历史已推荐曲目数（本次排除）: ${alreadyRecommendedIds.length}`);
+    const alreadyRecommendedIds = getRecommendedTrackIds(username, systemType);
+    // #region agent log
+    debugLog({ location: 'server.js:recommend', message: 'recommend_counts', data: { username, systemType, behaviorLen: behaviorHistory.length, alreadyLen: alreadyRecommendedIds.length }, hypothesisId: 'H2' });
+    // #endregion
+    console.log(`📈 行为历史记录数: ${behaviorHistory.length}${behaviorHistory.length === 0 ? '（清空记录后无历史行为）' : ''}${isColdStart ? ' (冷启动，仅用显式偏好，不参与)' : ''}`);
+    console.log(`📋 历史已推荐曲目数（本次排除）: ${alreadyRecommendedIds.length}${alreadyRecommendedIds.length === 0 ? '（清空记录后从 0 考虑，无历史推荐）' : ''}`);
     console.log(`🎯 请求推荐数量: ${count}`);
     
     // 生成推荐（用户明确不喜欢时传入 excludedTags；历史已推荐过的曲目不再推荐）
@@ -1381,13 +1480,28 @@ app.post('/api/recommend', async (req, res) => {
         return true;
       });
     }
+    const durationMs = Date.now() - recommendStartMs;
+    console.log(`⏱ 推荐请求耗时: ${durationMs}ms`);
+
+    // 冷启动/首曲播放：由后端拉取首曲（及前几首）详情并返回，避免前端再请求 Jamendo 失败导致「推荐不出歌曲」
+    let firstTrack = undefined;
+    let firstTracks = [];
+    if (recommendedTracks.length > 0) {
+      const toFetch = Math.min(recommendedTracks.length, 5);
+      const details = await Promise.all(
+        recommendedTracks.slice(0, toFetch).map((tid) => getFullTrackDetails(tid))
+      );
+      firstTracks = details.filter(Boolean);
+      firstTrack = firstTracks[0] || undefined;
+    }
+
     res.json({
       success: true,
       recommendedTracks,
       recommendedScores: recommendedScores || recommendedTracks.map(() => 0),
       count: recommendedTracks.length,
-      firstTrack: undefined,
-      firstTracks: [],
+      firstTrack: firstTrack || undefined,
+      firstTracks: firstTracks,
       filteredPlaylist: filteredPlaylist.length > 0 ? filteredPlaylist : undefined
     });
 
@@ -1396,14 +1510,14 @@ app.post('/api/recommend', async (req, res) => {
       if (recommendedTracks.length > 0) {
         saveRecommendedTrackIds(username, recommendedTracks, systemType);
       }
-      console.log(`✅ 推荐结果: ${recommendedTracks.length} 首歌曲`);
+      console.log(`✅ 推荐结果: ${recommendedTracks.length} 首歌曲，耗时 ${durationMs}ms`);
       if (filteredPlaylist.length > 0) {
         console.log(`📋 待播列表过滤（排除含厌恶 tag 的曲目）: 原 ${currentPlaylist.length} 首 → 保留 ${filteredPlaylist.length} 首`);
       }
       if (recommendedTracks.length > 0) {
         const trackInfoPromises = recommendedTracks.slice(0, 10).map(tid => getTrackInfo(tid));
         Promise.all(trackInfoPromises).then((trackInfos) => {
-          console.log(`   推荐歌曲:`);
+          console.log(`   推荐歌曲:（本结果对应请求原因: ${triggerLabel}）`);
           recommendedTracks.slice(0, 10).forEach((tid, index) => {
             const info = trackInfos[index];
             const cur = currentTrackId === tid ? ' ⭐当前播放' : '';
@@ -1748,8 +1862,8 @@ app.post('/api/preferences/heatmap', async (req, res) => {
             themes: JSON.parse(row.themes_weights || '{}')
           };
           const insStmt = db.prepare(`
-            INSERT INTO user_preference_updates (username, system_type, tag_category, old_tags, new_tags, operation)
-            VALUES (?, ?, ?, ?, ?, 'weight_update')
+            INSERT INTO user_preference_updates (username, system_type, tag_category, old_tags, new_tags, operation, updated_at, updated_at_timestamp)
+            VALUES (?, ?, ?, ?, ?, 'weight_update', ` + DB_NOW + `, ` + DB_UNIX + `)
           `);
           let anyChange = false;
           for (let i = 0; i < categories.length; i++) {
@@ -1763,6 +1877,14 @@ app.post('/api/preferences/heatmap', async (req, res) => {
           }
           insStmt.free();
           if (anyChange) {
+            // Terminal 日志：用户偏好更新（权重），更新前 / 更新后
+            console.log('\n📝 ========== 用户偏好更新（权重） ==========');
+            console.log(`🕐 时间: ${getTimestamp()}`);
+            console.log(`👤 用户: ${username} (系统: ${systemTypeNorm}) | 操作: weight_update`);
+            console.log('📤 更新前(权重):', JSON.stringify(oldWeights));
+            console.log('📥 更新后(权重):', JSON.stringify(newWeights));
+            console.log('===================================\n');
+
             const updateStmt = db.prepare(`
               UPDATE user_preferences
               SET genres_weights = ?, instruments_weights = ?, moods_weights = ?, themes_weights = ?, updated_at = ${DB_NOW}, updated_at_timestamp = ${DB_UNIX}
