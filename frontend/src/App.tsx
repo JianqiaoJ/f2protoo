@@ -313,9 +313,10 @@ function App() {
           <button
             type="button"
             onClick={toggleSystem}
-            className="px-3 py-1.5 text-sm text-gray-700 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-all border border-gray-300"
+            title="点击切换 A/B 系统（A=无小助手，B=Seren 小助手）"
+            className="px-3 py-1.5 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-all border border-gray-300"
           >
-            {currentSystem === 'A' ? 'B' : 'A'}
+            切换至系统 {currentSystem === 'A' ? 'B' : 'A'}
           </button>
         </div>
         <div className="flex items-center gap-3">
