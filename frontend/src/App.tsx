@@ -75,6 +75,7 @@ function App() {
   const sessionStartTimeRef = useRef<number>(0);
   const loadingStartRef = useRef<number>(0);
   const totalPausedMsRef = useRef<number>(0);
+  const userPauseStartRef = useRef<number>(0); // 用户主动暂停时的起点，恢复播放时累加到 totalPausedMsRef
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -90,14 +91,6 @@ function App() {
       if (Number.isFinite(t) && t > 0) sessionStartTimeRef.current = t;
     }
   }, []);
-  useEffect(() => {
-    if (currentTrack && isPlaying && sessionStartTimeRef.current === 0) {
-      const start = Date.now();
-      sessionStartTimeRef.current = start;
-      const user = localStorage.getItem('currentUser');
-      if (user) localStorage.setItem(SESSION_START_KEY(user), String(start));
-    }
-  }, [currentTrack, isPlaying]);
   // 加载推荐期间不计时：进入 loading 时记录起点，离开时累加暂停时长
   useEffect(() => {
     if (loading) {
@@ -109,6 +102,21 @@ function App() {
       }
     }
   }, [loading]);
+  // 用户主动暂停期间不计时：暂停时记录起点，恢复播放时累加
+  useEffect(() => {
+    if (currentTrack && !loading) {
+      if (isPlaying) {
+        if (userPauseStartRef.current > 0) {
+          totalPausedMsRef.current += Date.now() - userPauseStartRef.current;
+          userPauseStartRef.current = 0;
+        }
+      } else {
+        if (userPauseStartRef.current === 0) userPauseStartRef.current = Date.now();
+      }
+    } else {
+      userPauseStartRef.current = 0;
+    }
+  }, [currentTrack, isPlaying, loading]);
   
   // 检查是否是首次登录（没有用户偏好）
   const checkIsFirstLogin = () => {
@@ -133,6 +141,22 @@ function App() {
     }
     return false;
   });
+
+  // 冷启动结束后首曲开播时若未开始计时（或上次恢复了旧值），则强制从当前时刻开始计时，保证右上角计时一定会启动
+  const [, setSessionTimerTick] = useState(0);
+  useEffect(() => {
+    if (!currentTrack || !isPlaying) return;
+    const shouldStart =
+      sessionStartTimeRef.current === 0 ||
+      !hasCompletedFirstLogin; // 冷启动刚完成、首曲开播：覆盖可能被恢复的旧 session，从 0 开始计
+    if (shouldStart) {
+      const start = Date.now();
+      sessionStartTimeRef.current = start;
+      const user = localStorage.getItem('currentUser');
+      if (user) localStorage.setItem(SESSION_START_KEY(user), String(start));
+      setSessionTimerTick((t) => t + 1); // 触发一次重绘，让计时器立即显示
+    }
+  }, [currentTrack, isPlaying, hasCompletedFirstLogin]);
 
   // 清除记录时递增，使小助手 remount 并重新从空 storage 加载，立刻回到冷启动对话
   const [assistantClearKey, setAssistantClearKey] = useState(0);
@@ -294,22 +318,50 @@ function App() {
               />
             </div>
           )}
-          <span>
-            {currentSystem === 'A'
-              ? (
-                  <span
-                    role="button"
-                    tabIndex={0}
-                    onDoubleClick={() => setShowTagSelectInA((v) => !v)}
-                    className="cursor-pointer select-none"
-                    title="双击显示/隐藏标签选择"
-                  >
-                    欢迎使用音乐推荐系统，<span className="font-semibold text-gray-800">{currentUser}</span>
-                  </span>
-                )
-              : <>欢迎使用Seren音乐推荐小助手，<span className="font-semibold text-gray-800">{currentUser}</span></>
-            }
-          </span>
+          {currentSystem === 'A' && (
+            <button
+              type="button"
+              onClick={() => setShowTagSelectInA((v) => !v)}
+              className="p-1 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700 transition-colors"
+              title="打开标签选择"
+              aria-label="打开标签选择"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </button>
+          )}
+          <div className="flex flex-col">
+            <span>
+              {currentSystem === 'A'
+                ? (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onDoubleClick={() => setShowTagSelectInA((v) => !v)}
+                      className="cursor-pointer select-none"
+                      title="双击显示/隐藏标签选择"
+                    >
+                      欢迎使用音乐推荐系统，<span className="font-semibold text-gray-800">{currentUser}</span>
+                    </span>
+                  )
+                : <>欢迎使用Seren音乐推荐小助手，<span className="font-semibold text-gray-800">{currentUser}</span></>
+              }
+            </span>
+            {typeof __BUILD_TIME__ === 'string' && __BUILD_TIME__ && (
+              <span className="text-xs font-normal text-gray-400 mt-0.5">
+                更新时间：{(() => {
+                  try {
+                    const d = new Date(__BUILD_TIME__);
+                    return isNaN(d.getTime()) ? __BUILD_TIME__ : d.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+                  } catch {
+                    return __BUILD_TIME__;
+                  }
+                })()}
+              </span>
+            )}
+          </div>
           <button
             type="button"
             onClick={toggleSystem}
@@ -323,7 +375,9 @@ function App() {
           {(() => {
             const started = sessionStartTimeRef.current > 0;
             const rawElapsedMs = started ? now - sessionStartTimeRef.current : 0;
-            const pausedMs = loading ? (now - loadingStartRef.current) + totalPausedMsRef.current : totalPausedMsRef.current;
+            let pausedMs = totalPausedMsRef.current;
+            if (loading && loadingStartRef.current > 0) pausedMs += now - loadingStartRef.current;
+            if (userPauseStartRef.current > 0) pausedMs += now - userPauseStartRef.current;
             const elapsedSeconds = started ? Math.max(0, (rawElapsedMs - pausedMs) / 1000) : 0;
             const displaySeconds = Math.min(Math.floor(elapsedSeconds), 1200);
             const sessionReached20Min = displaySeconds >= 1200;
@@ -335,7 +389,7 @@ function App() {
                 className={`text-sm font-mono font-semibold tabular-nums ${
                   sessionReached20Min ? 'session-timer-flash text-orange-600' : 'text-gray-600'
                 }`}
-                title={sessionReached20Min ? '已满 20 分钟' : (started ? '净听歌时间（加载推荐时不计时）' : '未开始播放，计时未开始')}
+                title={sessionReached20Min ? '已满 20 分钟' : (started ? '净听歌时间（加载推荐与暂停时不计时）' : '未开始播放，计时未开始')}
               >
                 {timeStr}
                 {sessionReached20Min && <span className="ml-1 text-xs">(已满 20 分钟)</span>}
@@ -366,16 +420,17 @@ function App() {
       {showSerenSettings && <SerenSettingsModal onClose={() => setShowSerenSettings(false)} />}
 
       {/* Main Content：左侧区域 + 可拖动分隔条 + 右侧收藏/日志/历史 */}
-      <div className="flex-1 flex overflow-hidden relative">
-        {/* 左侧：播放器 + 可选小助手 */}
-        <div className="flex-1 flex min-w-0">
-          <div className="flex-1 flex flex-col min-w-0 relative">
-            <MusicPlayer 
-              isAssistantVisible={currentSystem === 'B' ? isAssistantVisible : false}
-              onToggleAssistant={() => setIsAssistantVisible(!isAssistantVisible)}
-            />
+      <div className="flex-1 flex overflow-hidden relative min-h-0">
+        {/* 左侧：播放器 + 可选小助手；高度限制为视口内，不随历史消息变高；仅内部（如小助手消息区）滚动 */}
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+          <div className="flex min-w-0 w-full flex-1 min-h-0">
+            <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden relative">
+              <MusicPlayer 
+                isAssistantVisible={currentSystem === 'B' ? isAssistantVisible : false}
+                onToggleAssistant={() => setIsAssistantVisible(!isAssistantVisible)}
+              />
 
-            {/* 冷启动：仅系统 A 显示标签选择浮层；系统 B 下永不出现 */}
+              {/* 冷启动：仅系统 A 显示标签选择浮层；系统 B 下永不出现 */}
             {currentSystem === 'A' && checkIsFirstLogin() && !hasCompletedFirstLogin && (
               <div className="absolute inset-0 z-40 overflow-y-auto bg-white/95 flex flex-col items-center pt-4 pb-8">
                 <ColdStartTagSelect
@@ -412,7 +467,7 @@ function App() {
               </div>
             )}
 
-            {/* 系统 B：冷启动时小助手覆盖播放器 */}
+            {/* 系统 B：冷启动时小助手覆盖播放器；冷启动阶段不应用 1 分钟无操作收起，避免输入未结束窗口就收起 */}
             {currentSystem === 'B' && isAssistantVisible && checkIsFirstLogin() && !currentTrack && !hasCompletedFirstLogin && (
               <>
                 <div
@@ -427,22 +482,24 @@ function App() {
                     key={`coldstart-${assistantClearKey}`}
                     onToggleAssistant={() => setIsAssistantVisible(false)}
                     onFirstRecommendation={handleFirstRecommendation}
+                    disableIdleClose={true}
                   />
                 </div>
               </>
             )}
-          </div>
-
-          {/* 系统 B：AI 小助手区域 - flex flex-col min-h-0 保证内部可滚动 */}
-          {currentSystem === 'B' && isAssistantVisible && (hasCompletedFirstLogin || currentTrack || !checkIsFirstLogin()) && (
-            <div className="w-1/3 flex-shrink-0 h-full min-h-0 flex flex-col overflow-hidden">
-              <AIAssistant
-                key={`normal-${assistantClearKey}`}
-                onToggleAssistant={() => setIsAssistantVisible(false)}
-                onFirstRecommendation={handleFirstRecommendation}
-              />
             </div>
-          )}
+
+            {/* 系统 B：AI 小助手区域 - flex flex-col min-h-0 保证内部可滚动 */}
+            {currentSystem === 'B' && isAssistantVisible && (hasCompletedFirstLogin || currentTrack || !checkIsFirstLogin()) && (
+              <div className="w-1/3 flex-shrink-0 min-h-0 flex flex-col overflow-hidden">
+                <AIAssistant
+                  key={`normal-${assistantClearKey}`}
+                  onToggleAssistant={() => setIsAssistantVisible(false)}
+                  onFirstRecommendation={handleFirstRecommendation}
+                />
+              </div>
+            )}
+          </div>
         </div>
 
         {/* 可拖动分隔条：改变左右两侧宽度 */}

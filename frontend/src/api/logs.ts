@@ -3,8 +3,7 @@
  * 并可将 console.log/info/warn/error 同时输出到该列表（与 terminal 一致）。
  */
 import { create } from 'zustand';
-
-const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:3000';
+import { API_BASE_URL } from './baseUrl';
 
 const MAX_LOG_LINES = 500;
 

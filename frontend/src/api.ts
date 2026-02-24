@@ -109,6 +109,9 @@ export const jamendoApi = {
     return recommendedTrackIds.slice(0, 10); // 返回前10个匹配的歌曲
   },
 
+  /** 单曲详情请求超时（毫秒），避免 Jamendo 无响应时推荐列表有但迟迟不播 */
+  getTrackByIdTimeoutMs: 15000,
+
   async getTrackById(trackId: string): Promise<JamendoTrack> {
     const numericId = extractTrackId(trackId);
     try {
@@ -119,6 +122,7 @@ export const jamendoApi = {
           format: 'json',
           limit: 1,
         },
+        timeout: this.getTrackByIdTimeoutMs,
       });
 
       if (response.data?.results && response.data.results.length > 0) {
@@ -148,6 +152,80 @@ export const jamendoApi = {
     } catch (error) {
       console.error('Jamendo API error:', error);
       throw new Error(`Failed to fetch track ${trackId}`);
+    }
+  },
+
+  /** 按艺术家名取一首随机曲目（用于喜爱艺术家插队），失败返回 null */
+  async getOneTrackByArtistName(artistName: string): Promise<JamendoTrack | null> {
+    if (!artistName?.trim()) return null;
+    try {
+      const artistRes = await axios.get(`${JAMENDO_API_BASE}/artists/`, {
+        params: { client_id: JAMENDO_CLIENT_ID, namesearch: artistName.trim(), limit: 1, format: 'json' },
+        timeout: 8000,
+      });
+      const artists = artistRes.data?.results;
+      if (!artists?.length) return null;
+      const artistId = artists[0].id;
+      const tracksRes = await axios.get(`${JAMENDO_API_BASE}/artists/tracks/`, {
+        params: { client_id: JAMENDO_CLIENT_ID, id: artistId, limit: 50, format: 'json' },
+        timeout: 8000,
+      });
+      const tracks = tracksRes.data?.results;
+      if (!tracks?.length) return null;
+      const raw = tracks[Math.floor(Math.random() * tracks.length)];
+      const trackId = `track_${raw.id}`;
+      const tags = trackTagsMap.get(trackId) || { genres: [], instruments: [], moods: [], themes: [] };
+      return {
+        id: String(raw.id),
+        name: raw.name || 'Unknown',
+        artist_name: raw.artist_name || artistName,
+        album_name: raw.album_name || 'Unknown Album',
+        image: raw.image || raw.album_image || '',
+        audio: raw.audio || raw.audiodownload || '',
+        duration: raw.duration || 0,
+        releasedate: raw.releasedate || '',
+        tags,
+      };
+    } catch (e) {
+      console.warn('getOneTrackByArtistName failed:', e);
+      return null;
+    }
+  },
+
+  /** 按专辑名取一首随机曲目（用于喜爱专辑插队），失败返回 null */
+  async getOneTrackByAlbumName(albumName: string): Promise<JamendoTrack | null> {
+    if (!albumName?.trim()) return null;
+    try {
+      const albumRes = await axios.get(`${JAMENDO_API_BASE}/albums/`, {
+        params: { client_id: JAMENDO_CLIENT_ID, namesearch: albumName.trim(), limit: 20, format: 'json' },
+        timeout: 8000,
+      });
+      const albums = albumRes.data?.results;
+      if (!albums?.length) return null;
+      const album = albums[Math.floor(Math.random() * Math.min(albums.length, 5))];
+      const tracksRes = await axios.get(`${JAMENDO_API_BASE}/albums/tracks/`, {
+        params: { client_id: JAMENDO_CLIENT_ID, id: album.id, format: 'json' },
+        timeout: 8000,
+      });
+      const tracks = tracksRes.data?.results;
+      if (!tracks?.length) return null;
+      const raw = tracks[Math.floor(Math.random() * tracks.length)];
+      const trackId = `track_${raw.id}`;
+      const tags = trackTagsMap.get(trackId) || { genres: [], instruments: [], moods: [], themes: [] };
+      return {
+        id: String(raw.id),
+        name: raw.name || 'Unknown',
+        artist_name: raw.artist_name || 'Unknown Artist',
+        album_name: raw.album_name || albumName,
+        image: raw.image || raw.album_image || '',
+        audio: raw.audio || raw.audiodownload || '',
+        duration: raw.duration || 0,
+        releasedate: raw.releasedate || '',
+        tags,
+      };
+    } catch (e) {
+      console.warn('getOneTrackByAlbumName failed:', e);
+      return null;
     }
   },
 

@@ -2,13 +2,21 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePlayerStore } from '../store';
 import { JamendoTrack } from '../types';
 import { logListeningBehavior } from '../api/behavior';
+import { logBubbleShow, logBubbleClick } from '../api/bubbleLog';
 import { getCurrentUser, getUserStorageKey } from '../utils/storage';
 import { ChatMessage, aiAssistantApi } from '../api/aiAssistant';
 import { getDiversityRecommendation } from '../api/diversity';
 import { getRecommendations } from '../api/recommend';
+import { setPlaylist } from '../api/playlist';
 import { jamendoApi } from '../api';
 import { appendSystemLog } from '../api/logs';
 import { getRecommendWhy } from '../api/recommend';
+import { tagWithChinese } from '../utils/tagToChinese';
+import { TextWithBoldTags } from './TextWithBoldTags';
+import SystemEyesModal from './SystemEyesModal';
+
+/** 多样性推荐触发：连续听满 6 首歌后触发（不要求每首播放时长） */
+const DIVERSITY_TRIGGER_AFTER_SONGS = 6;
 
 interface MusicPlayerProps {
   isAssistantVisible?: boolean;
@@ -45,7 +53,7 @@ function StreamingText({ text, charPerMs = 28, onComplete }: { text: string; cha
       onComplete();
     }
   }, [text, visibleLength, onComplete]);
-  return <>{text.slice(0, visibleLength)}</>;
+  return <TextWithBoldTags text={text.slice(0, visibleLength)} as="span" />;
 }
 
 export default function MusicPlayer({ isAssistantVisible = false, onToggleAssistant }: MusicPlayerProps) {
@@ -65,12 +73,21 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
     favorites,
     addHistoryRecord,
     getUserPreferences,
-    consecutivePlayCount,
     incrementConsecutivePlayCount,
     resetConsecutivePlayCount,
     recommendedTrackIds,
     recommendedTrackIndex,
     currentSystem,
+    setLoading,
+    setRecommendedTrackIds,
+    setRecommendedTrackIndex,
+    syncLastRecommendationVersion,
+    weightPlusOneQueue,
+    pushWeightPlusOneMessages,
+    shiftWeightPlusOneQueue,
+    addUserPreference,
+    removeUserPreferenceBatch,
+    addFavoriteArtistAndAlbum,
   } = usePlayerStore();
 
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -82,23 +99,38 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
   const [recommendationTipSuffix, setRecommendationTipSuffix] = useState<string | null>(null); // 1s 后追加「点击和我聊聊吧~」
   const [whyThisTrackTip, setWhyThisTrackTip] = useState<string | null>(null); // 「这首歌的感觉」气泡（推荐气泡消失 3s 后展示）
   const [ratingFeedbackTip, setRatingFeedbackTip] = useState<{ text: string; rating: number; trackId: string } | null>(null); // 评分反馈气泡
+  const [ratingRejectTip, setRatingRejectTip] = useState<string | null>(null); // 评分气泡点「说的不对」后短暂文案
   const lastRatingForFeedbackRef = useRef<{ trackId: string; rating: number } | null>(null); // 记录上次触发反馈的评分
   const [oneMinuteFeedbackTip, setOneMinuteFeedbackTip] = useState<{ text: string; trackId: string } | null>(null); // 1分钟反馈气泡
   const hasTriggeredOneMinuteFeedbackRef = useRef<{ trackId: string } | null>(null); // 记录是否已触发1分钟反馈
+  const oneMinuteRequestInProgressRef = useRef(false); // 防止 1 分钟反馈请求未返回时 effect 再次触发导致重复加载
+  const oneMinuteTipSetForTrackIdRef = useRef<string | null>(null); // 已设置过 1 分钟气泡的 trackId，避免多次 setTip 导致气泡反复加载
+  const lastCurrentTimeForOneMinuteRef = useRef(0); // 上一帧的 currentTime，用于仅在「从 <60s 跨到 ≥60s」时触发一次
   const [ninetyFivePercentTip, setNinetyFivePercentTip] = useState<{ text: string; trackId: string } | null>(null); // 95%进度反馈气泡
   const hasTriggeredNinetyFivePercentRef = useRef<{ trackId: string } | null>(null); // 记录是否已触发95%反馈
+  const lastProgressFor95Ref = useRef<number>(-1); // 用于仅在实际跨越 95% 时触发，避免切歌后残留 progress 或首帧误触发
   const hasAddedConfirmMessageForTrackRef = useRef<string | null>(null); // 同一首歌只加一条「确认」类消息，避免连续多条让用户确认
   const [quickSkipTip, setQuickSkipTip] = useState<string | null>(null); // 快速切换提示气泡
   const quickSkipCountRef = useRef<number>(0); // 记录连续快速切换的次数
+  const consecutiveLowRatingCountRef = useRef<number>(0); // 记录连续评分 ≤2 星的数量（满 3 触发不满意气泡）
   const hasTriggeredQuickSkipTipRef = useRef<boolean>(false); // 记录是否已触发快速切换提示
   const [diversityTip, setDiversityTip] = useState<string | null>(null); // 多样性推荐提示气泡
   const [diversityChoiceHandlers, setDiversityChoiceHandlers] = useState<{ onFamiliar: () => void; onExplore: () => void } | null>(null); // 多样性气泡的两个选项回调
+  const [quickSkipChoiceHandlers, setQuickSkipChoiceHandlers] = useState<{ onFamiliar: () => void; onExplore: () => void } | null>(null); // 「你似乎对推荐都不太满意」气泡的两个选项回调
+  const [favoriteTip, setFavoriteTip] = useState<string | null>(null); // 收藏后弹出的黄色气泡文案（风格部分）
+  /** 权重+1 提示在进度条气泡上方展示：当前条 1 秒后向上渐隐，再展示下一条 */
+  const [weightTipExiting, setWeightTipExiting] = useState(false);
+  const weightTipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [showSystemEyesModal, setShowSystemEyesModal] = useState(false); // 我的偏好图 / 系统眼中的你 弹窗
   const hasTriggeredDiversityRef = useRef<boolean>(false); // 记录是否已触发多样性推荐
   const loadRandomTrackInProgressRef = useRef<boolean>(false); // 推荐下一首请求进行中时，仍可从待播列表播下一首
-  const [bubbleQueueIndex, setBubbleQueueIndex] = useState(0); // 当前展示的气泡在队列中的下标，实现「一个加载完再加载下一个」
   const bubbleQueueFirstKeyRef = useRef<string | null>(null); // 用于队列首项变化时重置下标
   /** 仅当本次切歌来自「推荐下一首」时显示推荐气泡，避免其它切歌方式（如双击待播）也弹出 */
   const showRecommendationBubbleForNextTrackRef = useRef(false);
+  /** 每首歌每类气泡只弹出一次：记录当前 track 下已展示过的气泡类型，切歌时重置 */
+  const bubblesShownForTrackRef = useRef<{ trackId: string; recommendation: boolean; whyThisTrack: boolean; ratingFeedback: boolean; oneMinute: boolean }>({ trackId: '', recommendation: false, whyThisTrack: false, ratingFeedback: false, oneMinute: false });
+  /** 已为当前 track 调度过推荐气泡的 10s/3s 定时器，避免同首歌多次调度导致气泡重复弹 */
+  const hasScheduledRecommendationForTrackIdRef = useRef<string | null>(null);
   const [volume, setVolume] = useState(1); // 音量，范围 0-1
   const [isMuted, setIsMuted] = useState(false); // 是否静音
   const [showVolumeSlider, setShowVolumeSlider] = useState(false); // 是否显示音量滑块
@@ -108,22 +140,97 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
   const lastTrackRef = useRef<JamendoTrack | null>(null); // 记录上一首歌曲的完整信息
   const { setCurrentTime: setStoreCurrentTime } = usePlayerStore();
 
-  // 进度条气泡有序队列：同一时间只展示一个，当前气泡流式完成后再展示下一个
-  type BubbleItem = { key: string; text: string; type: 'recommendation' | 'whyThisTrack' | 'ratingFeedback' | 'oneMinute' | 'ninetyFive' | 'quickSkip' | 'diversity'; onClick?: () => void; onClose?: () => void; showCloseButton?: boolean; diversityChoice?: { onFamiliar: () => void; onExplore: () => void } };
+  // 进度条气泡有序队列：同一时间只展示一个，当前气泡流式完成后再展示下一个；评分气泡也显示在进度条上方，排队等待
+  type BubbleItem = { key: string; text: string; type: 'recommendation' | 'whyThisTrack' | 'ratingFeedback' | 'oneMinute' | 'ninetyFive' | 'quickSkip' | 'diversity'; onClick?: () => void; onClose?: () => void; showCloseButton?: boolean; diversityChoice?: { onFamiliar: () => void; onExplore: () => void }; quickSkipChoice?: { onFamiliar: () => void; onExplore: () => void }; ratingChoice?: { onConfirm: () => void; onReject: () => void } };
+  const [bubbleQueueIndex, setBubbleQueueIndex] = useState(0); // 当前展示的气泡在队列中的下标
   const bubbleQueue = useMemo((): BubbleItem[] => {
     const list: BubbleItem[] = [];
+    // 快速切换 / 多样性气泡（含按钮）优先队首，保证「你似乎对推荐都不太满意」等带按钮的气泡立即弹出
+    if (quickSkipTip) list.push({ key: 'quickSkip', text: quickSkipTip, type: 'quickSkip', onClick: onToggleAssistant, onClose: () => { setQuickSkipTip(null); setQuickSkipChoiceHandlers(null); }, showCloseButton: true, quickSkipChoice: quickSkipChoiceHandlers ?? undefined });
+    if (diversityTip) list.push({ key: 'diversity', text: diversityTip, type: 'diversity', onClick: onToggleAssistant, onClose: () => { setDiversityTip(null); setDiversityChoiceHandlers(null); }, showCloseButton: true, diversityChoice: diversityChoiceHandlers ?? undefined });
     if (recommendationTip) list.push({ key: 'recommendation', text: recommendationTip, type: 'recommendation', onClick: onToggleAssistant });
     if (whyThisTrackTip) list.push({ key: 'whyThisTrack', text: whyThisTrackTip, type: 'whyThisTrack', onClick: onToggleAssistant });
-    if (ratingFeedbackTip) list.push({ key: 'ratingFeedback', text: ratingFeedbackTip.text, type: 'ratingFeedback', onClick: onToggleAssistant });
+    if (ratingFeedbackTip) {
+      const tip = ratingFeedbackTip;
+      list.push({
+        key: 'ratingFeedback',
+        text: tip.text,
+        type: 'ratingFeedback',
+        onClick: onToggleAssistant,
+        onClose: () => { setRatingFeedbackTip(null); },
+        showCloseButton: true,
+        ratingChoice: {
+          onConfirm: () => {
+            setRatingFeedbackTip(null);
+            if (!currentTrack || !currentTrack.tags || tip.trackId !== currentTrack.id) return;
+            if (tip.rating === 3) return; // 3 星普通评分：不增加也不调整权重
+            const isLowRating = tip.rating <= 2; // 用评分区分，避免文案含「不」误判为低分
+            const tagsToUpdate = {
+              genres: currentTrack.tags.genres || [],
+              instruments: currentTrack.tags.instruments || [],
+              moods: currentTrack.tags.moods || [],
+              themes: currentTrack.tags.themes || [],
+            };
+            if (isLowRating) {
+              const removals: { type: 'genres' | 'instruments' | 'moods' | 'themes'; items: string[] }[] = [];
+              if (tagsToUpdate.genres.length > 0) removals.push({ type: 'genres', items: tagsToUpdate.genres });
+              if (tagsToUpdate.instruments.length > 0) removals.push({ type: 'instruments', items: tagsToUpdate.instruments });
+              if (tagsToUpdate.moods.length > 0) removals.push({ type: 'moods', items: tagsToUpdate.moods });
+              if (tagsToUpdate.themes.length > 0) removals.push({ type: 'themes', items: tagsToUpdate.themes });
+              if (removals.length > 0) removeUserPreferenceBatch(removals, { operation: 'dislike_remove', conversationContent: '评分反馈：不喜欢' }).catch(() => {});
+              const allTagsLow = [...(tagsToUpdate.genres || []), ...(tagsToUpdate.instruments || []), ...(tagsToUpdate.moods || []), ...(tagsToUpdate.themes || [])];
+              if (allTagsLow.length > 0) setTimeout(() => pushWeightPlusOneMessages(allTagsLow.map((t) => `${tagWithChinese(t)}权重-1`)), 3000);
+            } else {
+              const ratingOpt = { operation: 'rating_confirm' as const };
+              for (let i = 0; i < 2; i++) {
+                if (tagsToUpdate.genres.length > 0) addUserPreference('genres', tagsToUpdate.genres, ratingOpt).catch(() => {});
+                if (tagsToUpdate.instruments.length > 0) addUserPreference('instruments', tagsToUpdate.instruments, ratingOpt).catch(() => {});
+                if (tagsToUpdate.moods.length > 0) addUserPreference('moods', tagsToUpdate.moods, ratingOpt).catch(() => {});
+                if (tagsToUpdate.themes.length > 0) addUserPreference('themes', tagsToUpdate.themes, ratingOpt).catch(() => {});
+              }
+              const allTags = [...(tagsToUpdate.genres || []), ...(tagsToUpdate.instruments || []), ...(tagsToUpdate.moods || []), ...(tagsToUpdate.themes || [])];
+              setTimeout(() => pushWeightPlusOneMessages(allTags.map((t) => `${tagWithChinese(t)}权重+1`)), 3000);
+            }
+          },
+          onReject: () => {
+            setRatingFeedbackTip(null);
+            setRatingRejectTip('好的，我不会据此修改您的偏好。');
+            setTimeout(() => setRatingRejectTip(null), 2500);
+          },
+        },
+      });
+    }
     if (oneMinuteFeedbackTip) list.push({ key: 'oneMinute', text: oneMinuteFeedbackTip.text, type: 'oneMinute', onClick: onToggleAssistant });
     if (ninetyFivePercentTip) list.push({ key: 'ninetyFive', text: ninetyFivePercentTip.text, type: 'ninetyFive', onClick: onToggleAssistant });
-    if (quickSkipTip) list.push({ key: 'quickSkip', text: quickSkipTip, type: 'quickSkip', onClick: onToggleAssistant, onClose: () => setQuickSkipTip(null), showCloseButton: true });
-    if (diversityTip) list.push({ key: 'diversity', text: diversityTip, type: 'diversity', onClick: onToggleAssistant, onClose: () => { setDiversityTip(null); setDiversityChoiceHandlers(null); }, showCloseButton: true, diversityChoice: diversityChoiceHandlers ?? undefined });
     return list;
-  }, [recommendationTip, whyThisTrackTip, ratingFeedbackTip, oneMinuteFeedbackTip, ninetyFivePercentTip, quickSkipTip, diversityTip, diversityChoiceHandlers, onToggleAssistant]);
+  }, [recommendationTip, whyThisTrackTip, ratingFeedbackTip, oneMinuteFeedbackTip, ninetyFivePercentTip, quickSkipTip, quickSkipChoiceHandlers, diversityTip, diversityChoiceHandlers, onToggleAssistant, currentTrack, addUserPreference, removeUserPreferenceBatch, pushWeightPlusOneMessages]);
 
   const bubbleQueueLengthRef = useRef(0);
   bubbleQueueLengthRef.current = bubbleQueue.length;
+  const currentBubbleLogIdRef = useRef<number | null>(null);
+  const lastLoggedBubbleRef = useRef<{ index: number; key: string; content: string } | null>(null);
+
+  // 气泡展示记录：当前展示的气泡变化时写入「展示时间、类型、内容」，并记录 log_id 供点击时更新
+  useEffect(() => {
+    const item = bubbleQueue[bubbleQueueIndex];
+    if (!item) return;
+    const same =
+      lastLoggedBubbleRef.current &&
+      lastLoggedBubbleRef.current.index === bubbleQueueIndex &&
+      lastLoggedBubbleRef.current.key === item.key &&
+      lastLoggedBubbleRef.current.content === item.text;
+    if (same) return;
+    lastLoggedBubbleRef.current = { index: bubbleQueueIndex, key: item.key, content: item.text };
+    const username = getCurrentUser();
+    if (!username) return;
+    logBubbleShow({
+      username,
+      bubble_type: item.type,
+      content: item.text,
+    }).then((logId) => {
+      currentBubbleLogIdRef.current = logId;
+    });
+  }, [bubbleQueueIndex, bubbleQueue]);
 
   useEffect(() => {
     const firstKey = bubbleQueue[0]?.key ?? null;
@@ -133,59 +240,164 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
     }
   }, [bubbleQueue]);
 
+  /** 按类型清除对应气泡状态，使队列更新、下一个气泡成为队首 */
+  const clearBubbleTipByType = (type: BubbleItem['type']) => {
+    switch (type) {
+      case 'recommendation':
+        setRecommendationTip(null);
+        setRecommendationTipSuffix(null);
+        break;
+      case 'whyThisTrack':
+        setWhyThisTrackTip(null);
+        break;
+      case 'ratingFeedback':
+        setRatingFeedbackTip(null);
+        break;
+      case 'oneMinute':
+        setOneMinuteFeedbackTip(null);
+        break;
+      case 'ninetyFive':
+        setNinetyFivePercentTip(null);
+        break;
+      case 'quickSkip':
+        setQuickSkipTip(null);
+        setQuickSkipChoiceHandlers(null);
+        break;
+      case 'diversity':
+        setDiversityTip(null);
+        setDiversityChoiceHandlers(null);
+        break;
+    }
+  };
+
+  // 当前气泡展示一定时间后清除并显示下一个；评分反馈 10 秒，其余 5 秒
+  const currentBubbleKey = bubbleQueue[bubbleQueueIndex]?.key ?? null;
+  useEffect(() => {
+    if (!currentBubbleKey) return;
+    const durationMs = currentBubbleKey === 'ratingFeedback' ? 10000 : 5000;
+    const t = setTimeout(() => {
+      clearBubbleTipByType(currentBubbleKey as BubbleItem['type']);
+      setBubbleQueueIndex(0);
+    }, durationMs);
+    return () => clearTimeout(t);
+  }, [bubbleQueueIndex, currentBubbleKey]);
+
   const isFavorited = currentTrack ? favorites.some(f => f.id === currentTrack.id) : false;
   const currentRating = currentTrack ? getRating(currentTrack.id) : 0;
 
-  // 当歌曲切换时，清除评分反馈气泡和1分钟反馈和95%反馈
+  // 权重+1 队列：每条仅展示 1 秒，无常驻；1s 后渐隐约 0.3s，1.3s 时强制 shift（不依赖 transitionEnd，避免最后一条不消失）
+  const currentWeightTipText = weightPlusOneQueue[0] ?? null;
+  const weightTipShiftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 队列为空时清除状态和定时器
+  useEffect(() => {
+    if (weightPlusOneQueue.length > 0) return;
+    setWeightTipExiting(false);
+    if (weightTipShiftTimerRef.current) {
+      clearTimeout(weightTipShiftTimerRef.current);
+      weightTipShiftTimerRef.current = null;
+    }
+    if (weightTipTimerRef.current) {
+      clearTimeout(weightTipTimerRef.current);
+      weightTipTimerRef.current = null;
+    }
+  }, [weightPlusOneQueue.length]);
+
+  useEffect(() => {
+    if (!currentWeightTipText || weightTipExiting) return;
+    if (weightTipTimerRef.current) clearTimeout(weightTipTimerRef.current);
+    if (weightTipShiftTimerRef.current) clearTimeout(weightTipShiftTimerRef.current);
+    // 1s 后进入渐隐
+    weightTipTimerRef.current = setTimeout(() => {
+      weightTipTimerRef.current = null;
+      setWeightTipExiting(true);
+    }, 1000);
+    // 1.3s 时强制 shift，不依赖 transitionEnd，保证最后一条也会消失
+    weightTipShiftTimerRef.current = setTimeout(() => {
+      weightTipShiftTimerRef.current = null;
+      shiftWeightPlusOneQueue();
+      setWeightTipExiting(false);
+    }, 1300);
+    return () => {
+      if (weightTipTimerRef.current) clearTimeout(weightTipTimerRef.current);
+      // 不清 weightTipShiftTimerRef：effect 因 weightTipExiting 重跑时会触发 cleanup，若也清掉 1.3s 定时器则 shift 永远不会执行，消息会卡住不消失、后续条目不出现
+    };
+  }, [currentWeightTipText, weightTipExiting]);
+
+  useEffect(() => () => {
+    if (weightTipTimerRef.current) clearTimeout(weightTipTimerRef.current);
+    if (weightTipShiftTimerRef.current) clearTimeout(weightTipShiftTimerRef.current);
+  }, []);
+
+  // 当歌曲切换时，清除各类气泡与 per-track 状态，并重置「每首歌每类气泡只弹一次」的 ref
   useEffect(() => {
     if (currentTrack) {
+      setRecommendationTip(null);
+      setRecommendationTipSuffix(null);
+      setWhyThisTrackTip(null);
       setRatingFeedbackTip(null);
+      setRatingRejectTip(null);
       setOneMinuteFeedbackTip(null);
       setNinetyFivePercentTip(null);
       setDiversityTip(null);
-      setDiversityChoiceHandlers(null);
+      if (weightTipTimerRef.current) {
+        clearTimeout(weightTipTimerRef.current);
+        weightTipTimerRef.current = null;
+      }
       lastRatingForFeedbackRef.current = null;
       hasTriggeredOneMinuteFeedbackRef.current = null;
+      oneMinuteRequestInProgressRef.current = false;
+      oneMinuteTipSetForTrackIdRef.current = null;
+      lastCurrentTimeForOneMinuteRef.current = 0;
       hasTriggeredNinetyFivePercentRef.current = null;
+      lastProgressFor95Ref.current = -1;
       hasAddedConfirmMessageForTrackRef.current = null; // 新歌允许一条确认消息
+      hasRequestedWhyThisTrackForTrackIdRef.current = null; // 新歌允许展示一次「这首歌的感觉」
+      hasScheduledRecommendationForTrackIdRef.current = null;
+      bubblesShownForTrackRef.current = { trackId: currentTrack.id, recommendation: false, whyThisTrack: false, ratingFeedback: false, oneMinute: false };
       
-      // 重置快速切换计数器（新歌曲开始播放时重置）
-      // 注意：这里不重置，因为我们要跟踪连续5次快速切换
-      // 只有当用户听完一首歌超过10秒时，才重置计数器
+      // 快速切换计数器：不在此处重置，在 handleNext 里当播放时长 ≥20 秒时重置
       
-      // 注意：不重置hasTriggeredDiversityRef，因为多样性推荐是一次性的，触发后需要等待下次达到20首
+      // 注意：不重置 hasTriggeredDiversityRef，触发后需等待下次连续听满 DIVERSITY_TRIGGER_AFTER_SONGS 首再触发
     }
   }, [currentTrack?.id]);
 
-  // 当Seren打开时，清除评分反馈气泡和1分钟反馈和95%反馈和快速切换提示和多样性推荐提示
-  useEffect(() => {
-    if (isAssistantVisible) {
-      setRatingFeedbackTip(null);
-      setOneMinuteFeedbackTip(null);
-      setNinetyFivePercentTip(null);
-      setQuickSkipTip(null);
-      setDiversityTip(null);
-      setDiversityChoiceHandlers(null);
-    }
-  }, [isAssistantVisible]);
+  // 气泡不受 Seren 是否收起影响，均正常弹出（不再在 Seren 打开时清除）
 
-  // 监听播放时长，当达到1分钟时触发反馈
+  // 监听播放时长，仅在「从 <60s 跨到 ≥60s」时触发一次反馈（听满 1 分钟节点，同一首歌只触发一次）
   useEffect(() => {
-    if (!currentTrack || !isPlaying || currentTime < 60) {
+    if (!currentTrack || !isPlaying) {
+      return;
+    }
+    const timeSec = Math.floor(currentTime);
+    const prevTime = lastCurrentTimeForOneMinuteRef.current;
+
+    // 切歌后 currentTime 可能尚未重置，仍为上一首的时长，导致误在“10秒”等时刻触发。若 ref 刚被清 0 而 currentTime 已≥60，视为上一首的残留，只更新 ref 不触发
+    if (prevTime === 0 && currentTime >= 60) {
+      lastCurrentTimeForOneMinuteRef.current = currentTime;
+      return;
+    }
+    lastCurrentTimeForOneMinuteRef.current = currentTime;
+
+    // 仅在跨越 60 秒时触发（用整数秒避免浮点导致多次进入）
+    if (prevTime >= 60 || timeSec < 60) {
       return;
     }
 
-    // 检查是否已经触发过1分钟反馈（避免重复触发）
+    // 每首歌只触发一次
     if (hasTriggeredOneMinuteFeedbackRef.current?.trackId === currentTrack.id) {
       return;
     }
-    // 同一首歌只加一条「确认」类消息，若已加过（1分钟/95%/评分任一）则不再加
+    if (oneMinuteRequestInProgressRef.current) {
+      return;
+    }
     if (hasAddedConfirmMessageForTrackRef.current === currentTrack.id) {
       return;
     }
 
-    // 标记已触发
     hasTriggeredOneMinuteFeedbackRef.current = { trackId: currentTrack.id };
+    oneMinuteRequestInProgressRef.current = true;
+    const trackIdForRequest = currentTrack.id;
 
     // 生成1分钟反馈
     const generateFeedback = async () => {
@@ -214,54 +426,55 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
           const messages: ChatMessage[] = stored ? JSON.parse(stored) : [];
           messages.push(feedbackMessage);
           localStorage.setItem(storageKey, JSON.stringify(messages));
-          // Seren 未打开时在进度条上弹出气泡，点击可打开 Seren 进行确认（与评分反馈一致）
-          if (!isAssistantVisible) {
-            setOneMinuteFeedbackTip({
-              text: feedbackText,
-              trackId: currentTrack.id,
-            });
-          }
+          // 无论 Seren 是否展开都弹出气泡；同一 track 只 set 一次
+          if (bubblesShownForTrackRef.current.trackId === trackIdForRequest && bubblesShownForTrackRef.current.oneMinute) return;
+          if (oneMinuteTipSetForTrackIdRef.current === trackIdForRequest) return;
+          oneMinuteTipSetForTrackIdRef.current = trackIdForRequest;
+          bubblesShownForTrackRef.current = { ...bubblesShownForTrackRef.current, trackId: trackIdForRequest, oneMinute: true };
+          setOneMinuteFeedbackTip({
+            text: feedbackText,
+            trackId: currentTrack.id,
+          });
         }
       } catch (error) {
         console.error('生成1分钟反馈失败:', error);
+      } finally {
+        oneMinuteRequestInProgressRef.current = false;
       }
     };
 
     generateFeedback();
-  }, [currentTime, currentTrack, isPlaying, isAssistantVisible]);
+  }, [currentTime, currentTrack, isPlaying]);
 
-  // 监听播放进度，当达到95%时触发反馈（如果标签不在用户偏好中）
+  // 监听播放进度，仅在实际「跨越 95%」时触发反馈（与 1 分钟反馈的跨越逻辑一致），避免切歌后 progress 残留或首帧误触发
   useEffect(() => {
-    if (!currentTrack || !isPlaying || progress < 95) {
+    if (!currentTrack || !isPlaying) return;
+    // 必须用 progress（与音频元素同步）
+    if (progress > 100) return; // 切歌后 progress 可能暂未重置，避免误触发
+    if (progress < 95) {
+      lastProgressFor95Ref.current = progress;
       return;
     }
+    // 仅当本曲播放过程中从 <95% 跨到 ≥95% 时触发；若 lastProgressFor95Ref 为 -1 说明刚切歌尚未见过 <95，不触发
+    if (lastProgressFor95Ref.current < 0 || lastProgressFor95Ref.current >= 95) {
+      lastProgressFor95Ref.current = progress;
+      return;
+    }
+    lastProgressFor95Ref.current = progress;
 
-    // 检查是否已经触发过95%反馈（避免重复触发）
-    if (hasTriggeredNinetyFivePercentRef.current?.trackId === currentTrack.id) {
-      return;
-    }
-    // 同一首歌只加一条「确认」类消息
-    if (hasAddedConfirmMessageForTrackRef.current === currentTrack.id) {
-      return;
-    }
+    if (hasTriggeredNinetyFivePercentRef.current?.trackId === currentTrack.id) return;
+    if (hasAddedConfirmMessageForTrackRef.current === currentTrack.id) return;
 
-    // 检查歌曲标签是否在用户偏好中
     const userPrefs = getUserPreferences();
     const trackTags = currentTrack.tags || { genres: [], instruments: [], moods: [], themes: [] };
-    
-    // 检查是否有标签不在用户偏好中
-    const hasNewTags = 
-      (trackTags.genres.length > 0 && trackTags.genres.some(g => !userPrefs.genres.includes(g))) ||
-      (trackTags.instruments.length > 0 && trackTags.instruments.some(i => !userPrefs.instruments.includes(i))) ||
-      (trackTags.moods.length > 0 && trackTags.moods.some(m => !userPrefs.moods.includes(m))) ||
-      (trackTags.themes.length > 0 && trackTags.themes.some(t => !userPrefs.themes.includes(t)));
+    const hasNewTags =
+      (trackTags.genres.length > 0 && trackTags.genres.some((g: string) => !userPrefs.genres.includes(g))) ||
+      (trackTags.instruments.length > 0 && trackTags.instruments.some((i: string) => !userPrefs.instruments.includes(i))) ||
+      (trackTags.moods.length > 0 && trackTags.moods.some((m: string) => !userPrefs.moods.includes(m))) ||
+      (trackTags.themes.length > 0 && trackTags.themes.some((t: string) => !userPrefs.themes.includes(t)));
 
-    // 如果所有标签都在用户偏好中，不触发反馈
-    if (!hasNewTags) {
-      return;
-    }
+    if (!hasNewTags) return;
 
-    // 标记已触发
     hasTriggeredNinetyFivePercentRef.current = { trackId: currentTrack.id };
 
     // 生成95%反馈
@@ -290,12 +503,10 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
           const messages: ChatMessage[] = stored ? JSON.parse(stored) : [];
           messages.push(feedbackMessage);
           localStorage.setItem(storageKey, JSON.stringify(messages));
-          if (!isAssistantVisible) {
-            setNinetyFivePercentTip({
-              text: feedbackText,
-              trackId: currentTrack.id,
-            });
-          }
+          setNinetyFivePercentTip({
+            text: feedbackText,
+            trackId: currentTrack.id,
+          });
         }
       } catch (error) {
         console.error('生成95%反馈失败:', error);
@@ -303,7 +514,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
     };
 
     generateFeedback();
-  }, [progress, currentTrack, isPlaying, isAssistantVisible, getUserPreferences]);
+  }, [progress, currentTrack, isPlaying, getUserPreferences]);
 
   // 音量控制
   useEffect(() => {
@@ -412,10 +623,26 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
           }).catch(err => console.error('记录播放行为失败:', err));
         }
       }
-      audio.play().catch(err => {
-        console.error('Play failed:', err);
-        usePlayerStore.getState().setIsPlaying(false);
-      });
+      const doPlay = () => {
+        audio.play().catch(err => {
+          console.error('Play failed:', err?.name, err?.message);
+          // NotAllowedError 多为浏览器自动播放策略：需用户先与页面交互（如点击播放按钮）后才能播
+          if (err?.name === 'NotAllowedError') {
+            console.warn('自动播放被浏览器拦截，请点击播放按钮开始播放');
+          }
+          usePlayerStore.getState().setIsPlaying(false);
+        });
+      };
+      // 切歌后新 src 可能尚未加载完成，先等 canplay 再播，避免播不出来
+      if (currentTrack && (audio.readyState < 2 || audio.networkState === 0)) {
+        const onCanPlay = () => {
+          audio.removeEventListener('canplay', onCanPlay);
+          doPlay();
+        };
+        audio.addEventListener('canplay', onCanPlay);
+        return () => audio.removeEventListener('canplay', onCanPlay);
+      }
+      doPlay();
     } else {
       audio.pause();
     }
@@ -425,40 +652,71 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
     togglePlayPause();
   };
 
-  // 生成推荐解释文本
-  const generateRecommendationExplanation = (track: JamendoTrack | null): string | null => {
+  // 生成推荐解释文本（「根据**为您推荐」气泡）：标签取用户偏好与歌曲标签的交集；交集过多取权重最高的前5个；无交集则**为这首歌的标签
+  const generateRecommendationExplanation = (track: JamendoTrack | null, isDiversity: boolean): string | null => {
     if (!track || !track.tags) return null;
-    
+
+    const buildPartsFromTags = (): string[] => {
+      const p: string[] = [];
+      if (track!.tags!.genres?.length) p.push(`风格${track!.tags!.genres.map(tagWithChinese).join('、')}`);
+      if (track!.tags!.instruments?.length) p.push(`器乐${track!.tags!.instruments.map(tagWithChinese).join('、')}`);
+      const moodTheme = [...new Set([...(track!.tags!.moods || []), ...(track!.tags!.themes || [])])];
+      if (moodTheme.length) p.push(`情绪·主题${moodTheme.map(tagWithChinese).join('、')}`);
+      return p;
+    };
+
+    if (isDiversity) {
+      const parts = buildPartsFromTags();
+      if (parts.length === 0) return null;
+      return `尝试一下${parts.join('、')}吧～`;
+    }
+
+    // 非多样性：气泡里的** = 用户偏好标签 ∩ 歌曲标签；过多则只取交集里用户偏好权重最高的前5个；无交集则** = 这首歌的标签
     const userPrefs = getUserPreferences();
-    const matchedTags: string[] = [];
-    
-    // 检查匹配的风格
-    if (track.tags.genres && track.tags.genres.length > 0 && userPrefs.genres.length > 0) {
-      const matchedGenres = track.tags.genres.filter(g => userPrefs.genres.includes(g));
-      if (matchedGenres.length > 0) {
-        matchedTags.push(`风格${matchedGenres.join('、')}`);
-      }
+    type TagWithMeta = { tag: string; category: 'genres' | 'instruments' | 'moods_themes'; weight: number };
+    const intersection: TagWithMeta[] = [];
+    const getWeight = (cat: TagWithMeta['category'], tag: string): number => {
+      const w = cat === 'genres' ? userPrefs.genresWeights?.[tag]
+        : cat === 'instruments' ? userPrefs.instrumentsWeights?.[tag]
+        : (userPrefs.moodsWeights?.[tag] ?? userPrefs.themesWeights?.[tag]);
+      return typeof w === 'number' ? w : 0;
+    };
+    if (track.tags.genres?.length && userPrefs.genres.length) {
+      track.tags.genres.filter(g => userPrefs.genres.includes(g)).forEach(g => {
+        intersection.push({ tag: g, category: 'genres', weight: getWeight('genres', g) });
+      });
     }
-    
-    // 检查匹配的乐器
-    if (track.tags.instruments && track.tags.instruments.length > 0 && userPrefs.instruments.length > 0) {
-      const matchedInstruments = track.tags.instruments.filter(i => userPrefs.instruments.includes(i));
-      if (matchedInstruments.length > 0) {
-        matchedTags.push(`器乐${matchedInstruments.join('、')}`);
-      }
+    if (track.tags.instruments?.length && userPrefs.instruments.length) {
+      track.tags.instruments.filter(i => userPrefs.instruments.includes(i)).forEach(i => {
+        intersection.push({ tag: i, category: 'instruments', weight: getWeight('instruments', i) });
+      });
     }
-    
-    // 情绪与主题合并为一类，去重后只展示一次（同一 tag 不说两遍）
-    const matchedMoods = (track.tags.moods && userPrefs.moods.length > 0) ? track.tags.moods.filter(m => userPrefs.moods.includes(m)) : [];
-    const matchedThemes = (track.tags.themes && userPrefs.themes.length > 0) ? track.tags.themes.filter(t => userPrefs.themes.includes(t)) : [];
-    const moodThemeTags = [...new Set([...matchedMoods, ...matchedThemes])];
-    if (moodThemeTags.length > 0) {
-      matchedTags.push(`情绪·主题${moodThemeTags.join('、')}`);
+    const moodThemePrefs = [...(userPrefs.moods || []), ...(userPrefs.themes || [])];
+    const moodThemeTrack = [...new Set([...(track.tags.moods || []), ...(track.tags.themes || [])])];
+    if (moodThemeTrack.length && moodThemePrefs.length) {
+      moodThemeTrack.filter(t => moodThemePrefs.includes(t)).forEach(t => {
+        intersection.push({ tag: t, category: 'moods_themes', weight: getWeight('moods_themes', t) });
+      });
     }
-    
-    if (matchedTags.length === 0) return null;
-    
-    return `根据你偏好的${matchedTags.join('和')}为您推荐`;
+
+    if (intersection.length > 0) {
+      // 交集数量过多时，只取用户偏好权重最高的前5个（最多）
+      const top = [...intersection].sort((a, b) => b.weight - a.weight).slice(0, 5);
+      const byCat = { genres: [] as string[], instruments: [] as string[], moods_themes: [] as string[] };
+      top.forEach(({ tag, category }) => {
+        if (!byCat[category].includes(tag)) byCat[category].push(tag);
+      });
+      const parts: string[] = [];
+      if (byCat.genres.length) parts.push(`风格${byCat.genres.map(tagWithChinese).join('、')}`);
+      if (byCat.instruments.length) parts.push(`器乐${byCat.instruments.map(tagWithChinese).join('、')}`);
+      if (byCat.moods_themes.length) parts.push(`情绪·主题${byCat.moods_themes.map(tagWithChinese).join('、')}`);
+      return `根据你喜欢的${parts.join('、')}为您推荐`;
+    }
+
+    // 没有交集：** 用这首歌的标签
+    const parts = buildPartsFromTags();
+    if (parts.length === 0) return null;
+    return `根据这首歌的${parts.join('、')}为您推荐`;
   };
 
   // 添加消息到聊天记录
@@ -484,11 +742,13 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
   const previousTrackIdForExplanationRef = useRef<string>('');
   const recommendationTipTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const whyThisTrackClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasRequestedWhyThisTrackForTrackIdRef = useRef<string | null>(null); // 同一首歌只请求并展示一次「这首歌的感觉」气泡
   
   // 分割线消息只在 AIAssistant 内根据 currentTrack 添加一次，此处不再重复添加
   
-  // 监听 currentTrack 变化，生成推荐解释（仅当本次切歌来自「点击推荐下一首」时显示气泡）
+  // 监听 currentTrack.id 变化，生成推荐解释（仅当本次切歌来自「点击推荐下一首」时显示气泡）；依赖 id 而非 currentTrack 避免同首歌引用变化导致 effect 反复执行、清理 timeouts 使「这首歌的感觉」无法展示
   useEffect(() => {
+    const currentTrack = usePlayerStore.getState().currentTrack;
     if (!currentTrack) {
       previousTrackIdForExplanationRef.current = '';
       return;
@@ -502,45 +762,69 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
                                  previousTrackIdForExplanationRef.current !== currentTrack.id) && shouldShowBubble;
     
     if (isNewRecommendation) {
-      const explanation = generateRecommendationExplanation(currentTrack);
+      // 同一首歌只弹一次推荐气泡，防止重复
+      if (bubblesShownForTrackRef.current.trackId === currentTrack.id && bubblesShownForTrackRef.current.recommendation) {
+        previousTrackIdForExplanationRef.current = currentTrack.id;
+        return;
+      }
+      // 同首歌已调度过 10s/3s 定时器则不再调度，避免气泡重复弹
+      if (hasScheduledRecommendationForTrackIdRef.current === currentTrack.id) {
+        previousTrackIdForExplanationRef.current = currentTrack.id;
+        return;
+      }
+      const reason = usePlayerStore.getState().currentTrackRecommendReason;
+      const isDiversity = reason === '多样性推荐';
+      // 喜爱艺术家/专辑插队时使用预设推荐理由
+      const isFavoriteArtistOrAlbumReason = reason && (reason.startsWith('你刚听了') || reason.startsWith('你刚刚听了'));
+      const explanation = isFavoriteArtistOrAlbumReason ? reason : generateRecommendationExplanation(currentTrack, isDiversity);
       
       if (explanation) {
         setWhyThisTrackTip(null); // 新推荐时先清掉上一首的「感觉」气泡
         // 无论Seren是否展开，都保存到聊天框
         addMessageToChat(explanation);
-        // 始终设置推荐解释气泡内容；Seren 收起时由渲染条件 recommendationTip && !isAssistantVisible 显示
+        // 先标记已展示推荐气泡，再 setState，避免重入时再次设置
+        bubblesShownForTrackRef.current = { ...bubblesShownForTrackRef.current, trackId: currentTrack.id, recommendation: true };
         setRecommendationTip(explanation);
         setRecommendationTipSuffix(null);
+        setBubbleQueueIndex(0); // 切到新推荐时重置为队首，确保进度条上方显示本条解释弹框
+        hasScheduledRecommendationForTrackIdRef.current = currentTrack.id;
         const timeouts: ReturnType<typeof setTimeout>[] = [];
         const trackForWhy = currentTrack;
-        // 10 秒后关闭「根据…推荐」气泡，再在 3s 后请求「这首歌的感觉」并作为气泡展示（着重强调感觉）
+        // 5 秒后关闭「根据…推荐」气泡，再在 3s 后请求「这首歌的感觉」并作为气泡展示（与进度条气泡常驻 5 秒一致）
         const t2 = setTimeout(() => {
           setRecommendationTip(null);
           setRecommendationTipSuffix(null);
           const t3 = setTimeout(async () => {
             const stillCurrent = usePlayerStore.getState().currentTrack?.id === trackForWhy.id;
             if (!stillCurrent) return;
+            // 同一首歌只请求并展示一次，避免一首歌播放过程中气泡弹出多次
+            if (hasRequestedWhyThisTrackForTrackIdRef.current === trackForWhy.id) return;
+            if (bubblesShownForTrackRef.current.trackId === trackForWhy.id && bubblesShownForTrackRef.current.whyThisTrack) return;
+            hasRequestedWhyThisTrackForTrackIdRef.current = trackForWhy.id;
             const username = getCurrentUser();
             if (!username) return;
             try {
               const whyData = await getRecommendWhy(username, trackForWhy.id, trackForWhy.tags);
               const text = whyData
-                ? await aiAssistantApi.generateWhyThisTrackEmphasizeFeeling(whyData, trackForWhy.name, trackForWhy.artist_name)
-                : await aiAssistantApi.generateWhyThisTrackFallbackEmphasizeFeeling(trackForWhy.name, trackForWhy.artist_name, trackForWhy.tags);
+                ? await aiAssistantApi.generateWhyThisTrackKeywords(whyData, trackForWhy.name, trackForWhy.artist_name)
+                : await aiAssistantApi.generateWhyThisTrackFallbackKeywords(trackForWhy.name, trackForWhy.artist_name, trackForWhy.tags);
               if (usePlayerStore.getState().currentTrack?.id === trackForWhy.id) {
+                if (bubblesShownForTrackRef.current.trackId === trackForWhy.id && bubblesShownForTrackRef.current.whyThisTrack) return;
                 if (whyThisTrackClearRef.current) clearTimeout(whyThisTrackClearRef.current);
+                bubblesShownForTrackRef.current = { ...bubblesShownForTrackRef.current, trackId: trackForWhy.id, whyThisTrack: true };
                 setWhyThisTrackTip(text);
                 whyThisTrackClearRef.current = setTimeout(() => {
                   setWhyThisTrackTip(null);
                   whyThisTrackClearRef.current = null;
-                }, 10000);
+                }, 5000);
               }
             } catch (e) {
               console.warn('获取「这首歌的感觉」气泡失败:', e);
+              hasRequestedWhyThisTrackForTrackIdRef.current = null; // 失败则允许重试
             }
           }, 3000); // 推荐气泡消失后 3s
           timeouts.push(t3);
-        }, 10000);
+        }, 5000);
         timeouts.push(t2);
         recommendationTipTimeoutsRef.current = timeouts;
       }
@@ -557,7 +841,83 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
       }
       setWhyThisTrackTip(null);
     };
-  }, [currentTrack]);
+  }, [currentTrack?.id]);
+
+  /** 显示「猜测用户对推荐不满意」气泡（连续跳过≥5 或 连续3首评分≤2星 时共用） */
+  const showDissatisfactionBubble = () => {
+    hasTriggeredQuickSkipTipRef.current = true;
+    const tipMessage = '你似乎对推荐的歌曲都不太满意呢。来聊聊你的喜好，让我更好地为你推荐吧！';
+    const showExploreResultTipForQuickSkip = async () => {
+      const track = usePlayerStore.getState().currentTrack;
+      if (!track) return;
+      try {
+        const intro = await aiAssistantApi.generateDiversityIntroduction({
+          name: track.name,
+          artist: track.artist_name,
+          tags: track.tags,
+        });
+        setQuickSkipTip(null);
+        setQuickSkipChoiceHandlers(null);
+        setDiversityTip(`尝试一下新风格吧～\n\n${intro}`);
+        setDiversityChoiceHandlers({
+          onFamiliar: async () => {
+            setDiversityTip(null);
+            setDiversityChoiceHandlers(null);
+            const ok = await usePlayerStore.getState().playNextFromList();
+            if (ok) appendSystemLog('[推荐] 多样性选择「继续听我熟悉的风格」：继续播放待播列表');
+          },
+          onExplore: () => {
+            setDiversityTip(null);
+            setDiversityChoiceHandlers(null);
+            usePlayerStore.getState().prependDiversityTrackAndPlay().then(() => {
+              appendSystemLog('[推荐] 多样性选择「探索新领域」：已插入待播列表最前并播放');
+              showExploreResultTipForQuickSkip();
+            }).catch((e) => appendSystemLog(`[推荐] 探索新领域失败: ${e instanceof Error ? e.message : String(e)}`));
+          },
+        });
+      } catch (_) {}
+    };
+    setQuickSkipTip(tipMessage);
+    setQuickSkipChoiceHandlers({
+      onFamiliar: async () => {
+        setQuickSkipTip(null);
+        setQuickSkipChoiceHandlers(null);
+        const ok = await usePlayerStore.getState().playNextFromList();
+        if (ok) appendSystemLog('[推荐] 快速切换选择「继续听我熟悉的风格」：继续播放待播列表');
+      },
+      onExplore: () => {
+        setQuickSkipTip(null);
+        setQuickSkipChoiceHandlers(null);
+        usePlayerStore.getState().prependDiversityTrackAndPlay().then(() => {
+          appendSystemLog('[推荐] 快速切换选择「探索新领域」：已插入待播列表最前并播放');
+          showExploreResultTipForQuickSkip();
+        }).catch((e) => {
+          appendSystemLog(`[推荐] 探索新领域失败: ${e instanceof Error ? e.message : String(e)}`);
+        });
+      },
+    });
+    setTimeout(() => {
+      setQuickSkipTip(null);
+      setQuickSkipChoiceHandlers(null);
+    }, 5000);
+    if (isAssistantVisible) {
+      const storageKey = getUserStorageKey('ai-assistant-messages');
+      const stored = localStorage.getItem(storageKey);
+      const messages = stored ? JSON.parse(stored) : [];
+      const newMessage: ChatMessage = {
+        role: 'assistant',
+        content: tipMessage,
+        fromSeren: true,
+        buttons: [
+          { label: '继续听我熟悉的风格', action: 'quick_skip_continue' },
+          { label: '探索新领域', action: 'quick_skip_explore' },
+        ],
+      };
+      messages.push(newMessage);
+      localStorage.setItem(storageKey, JSON.stringify(messages));
+      window.dispatchEvent(new Event('storage'));
+    }
+  };
 
   const handleNext = async () => {
     console.log('handleNext 被调用:', { currentTrack: !!currentTrack, currentRating, loading });
@@ -602,61 +962,39 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
         }
       }
       
-      // 检查播放时长是否小于10秒
-      if (playDuration < 10) {
+      // 检查播放时长是否小于20秒（每首听不满20秒计为一次「跳过」）
+      if (playDuration < 20) {
         // 增加快速切换计数器
         quickSkipCountRef.current += 1;
-        console.log(`⚠️ 快速切换检测: 当前歌曲播放时长 ${playDuration}秒 < 10秒，连续快速切换次数: ${quickSkipCountRef.current}`);
+        console.log(`⚠️ 快速切换检测: 当前歌曲播放时长 ${playDuration}秒 < 20秒，连续跳过次数: ${quickSkipCountRef.current}`);
         
-          // 如果连续5次快速切换，且未触发过提示，显示气泡
+          // 连续跳过5首歌且每首听不满20秒，显示不满意气泡
           if (quickSkipCountRef.current >= 5 && !hasTriggeredQuickSkipTipRef.current) {
-            hasTriggeredQuickSkipTipRef.current = true;
-            const tipMessage = '你似乎对推荐的歌曲都不太满意呢。来聊聊你的喜好，让我更好地为你推荐吧！';
-            
-            // 如果Seren未展开，显示气泡；如果已展开，直接添加到聊天记录
-            if (!isAssistantVisible) {
-              setQuickSkipTip(tipMessage);
-              // 气泡显示10秒后自动隐藏
-              setTimeout(() => {
-                setQuickSkipTip(null);
-              }, 10000);
-            } else {
-              // Seren已展开，直接添加到聊天记录
-              const storageKey = getUserStorageKey('ai-assistant-messages');
-              const stored = localStorage.getItem(storageKey);
-              const messages = stored ? JSON.parse(stored) : [];
-              const newMessage: ChatMessage = {
-                role: 'assistant',
-                content: tipMessage,
-              };
-              messages.push(newMessage);
-              localStorage.setItem(storageKey, JSON.stringify(messages));
-              // 触发storage事件，让AIAssistant组件重新加载消息
-              window.dispatchEvent(new Event('storage'));
-            }
+            appendSystemLog('[推荐] 触发不满意气泡（连续跳过≥5首且每首<20秒）');
+            showDissatisfactionBubble();
           }
       } else {
-        // 播放时长 >= 10秒，重置快速切换计数器
-        if (quickSkipCountRef.current > 0) {
-          console.log(`✅ 播放时长 ${playDuration}秒 >= 10秒，重置快速切换计数器`);
+        // 播放时长 >= 20秒，重置快速切换计数器与连续低分计数，允许下次再次触发不满意气泡
+        if (quickSkipCountRef.current > 0 || consecutiveLowRatingCountRef.current > 0) {
+          console.log(`✅ 播放时长 ${playDuration}秒 >= 20秒，重置快速切换/连续低分计数器`);
           quickSkipCountRef.current = 0;
-          hasTriggeredQuickSkipTipRef.current = false; // 重置提示标记，允许下次再次触发
+          consecutiveLowRatingCountRef.current = 0;
+          hasTriggeredQuickSkipTipRef.current = false;
         }
       }
       
       playStartTimeRef.current = 0;
     }
-    
-    // 增加连续听歌数量
+
+    // 每听完 1 首则增加连续听歌数，满 6 首触发多样性推荐（不要求每首播放时长）
     incrementConsecutivePlayCount();
-    const newCount = consecutivePlayCount + 1;
-    console.log(`📊 连续听歌数量: ${newCount}`);
-    
-    // 检查是否达到20首，触发多样性推荐
-    if (newCount >= 20 && !hasTriggeredDiversityRef.current) {
+    const countAfter = usePlayerStore.getState().consecutivePlayCount;
+    const shouldTriggerDiversity = countAfter >= DIVERSITY_TRIGGER_AFTER_SONGS && !hasTriggeredDiversityRef.current;
+
+    if (shouldTriggerDiversity) {
       hasTriggeredDiversityRef.current = true;
-      resetConsecutivePlayCount(); // 重置计数，允许下次再次触发
-      appendSystemLog('[推荐] 触发多样性推荐（连续听歌达20首）');
+      resetConsecutivePlayCount();
+      appendSystemLog(`[推荐] 触发多样性推荐（连续听满${DIVERSITY_TRIGGER_AFTER_SONGS}首歌）`);
       
       // 获取多样性推荐
       const username = getCurrentUser();
@@ -674,54 +1012,61 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
                 tags: diversityTrack.tags,
               });
               
-              // 如果Seren未展开，显示气泡（含「继续听我熟悉的风格」「探索新领域」两个选项）；如果已展开，直接添加到聊天记录
-              if (!isAssistantVisible) {
-                setDiversityTip(introduction);
-                setDiversityChoiceHandlers({
-                  onFamiliar: () => {
-                    setDiversityTip(null);
-                    setDiversityChoiceHandlers(null);
-                    const username = getCurrentUser();
-                    if (!username) return;
-                    const { setLoading, setCurrentTrack, setIsPlaying, getUserPreferences, currentSystem } = usePlayerStore.getState();
-                    setLoading(true);
-                    getRecommendations({
-                      username,
-                      systemType: currentSystem,
-                      explicitPreferences: getUserPreferences(),
-                      count: 1,
-                      trigger: 'playlist_finished',
-                    })
-                      .then(async (result) => {
-                        const trackId = result.recommendedTracks?.[0];
-                        if (trackId) {
-                          const track = await jamendoApi.getTrackById(trackId);
-                          if (track) {
-                            setCurrentTrack(track);
-                            setIsPlaying(true);
-                            appendSystemLog('[推荐] 多样性选择「继续听我熟悉的风格」：已随机推荐一首并播放');
-                          }
-                        }
-                      })
-                      .catch((e) => {
-                        appendSystemLog(`[推荐] 随机推荐失败: ${e instanceof Error ? e.message : String(e)}`);
-                      })
-                      .finally(() => usePlayerStore.getState().setLoading(false));
-                  },
-                  onExplore: async () => {
-                    setDiversityTip(null);
-                    setDiversityChoiceHandlers(null);
-                    const ok = await usePlayerStore.getState().playNextFromList();
-                    if (ok) appendSystemLog('[推荐] 多样性选择「探索新领域」：继续播放待播列表');
-                  },
-                });
-                // 气泡显示10秒后自动隐藏
-                setTimeout(() => {
+              // 无论 Seren 是否展开都显示气泡（含「继续听我熟悉的风格」「探索新领域」两个选项）
+              const showExploreResultTip = async () => {
+                const track = usePlayerStore.getState().currentTrack;
+                if (!track) return;
+                try {
+                  const intro = await aiAssistantApi.generateDiversityIntroduction({
+                    name: track.name,
+                    artist: track.artist_name,
+                    tags: track.tags,
+                  });
+                  setDiversityTip(`尝试一下新风格吧～\n\n${intro}`);
+                  setDiversityChoiceHandlers({
+                    onFamiliar: async () => {
+                      setDiversityTip(null);
+                      setDiversityChoiceHandlers(null);
+                      const ok = await usePlayerStore.getState().playNextFromList();
+                      if (ok) appendSystemLog('[推荐] 多样性选择「继续听我熟悉的风格」：继续播放待播列表');
+                    },
+                    onExplore: () => {
+                      setDiversityTip(null);
+                      setDiversityChoiceHandlers(null);
+                      usePlayerStore.getState().prependDiversityTrackAndPlay().then(() => {
+                        appendSystemLog('[推荐] 多样性选择「探索新领域」：已插入待播列表最前并播放');
+                        showExploreResultTip();
+                      }).catch((e) => {
+                        appendSystemLog(`[推荐] 探索新领域失败: ${e instanceof Error ? e.message : String(e)}`);
+                      });
+                    },
+                  });
+                } catch (_) {}
+              };
+              setDiversityTip(introduction);
+              setDiversityChoiceHandlers({
+                onFamiliar: async () => {
                   setDiversityTip(null);
                   setDiversityChoiceHandlers(null);
-                }, 10000);
-              } else {
-                // Seren已展开，直接添加到聊天记录（LLM 产出，标记 Seren）
+                  const ok = await usePlayerStore.getState().playNextFromList();
+                  if (ok) appendSystemLog('[推荐] 多样性选择「继续听我熟悉的风格」：继续播放待播列表');
+                },
+                onExplore: () => {
+                  setDiversityTip(null);
+                  setDiversityChoiceHandlers(null);
+                  usePlayerStore.getState().prependDiversityTrackAndPlay().then(() => {
+                    appendSystemLog('[推荐] 多样性选择「探索新领域」：已插入待播列表最前并播放');
+                    showExploreResultTip();
+                  }).catch((e) => {
+                    appendSystemLog(`[推荐] 探索新领域失败: ${e instanceof Error ? e.message : String(e)}`);
+                  });
+                },
+              });
+              setTimeout(() => {
+                setDiversityTip(null);
+                setDiversityChoiceHandlers(null);
+              }, 5000);
+              if (isAssistantVisible) {
                 const storageKey = getUserStorageKey('ai-assistant-messages');
                 const stored = localStorage.getItem(storageKey);
                 const messages = stored ? JSON.parse(stored) : [];
@@ -732,16 +1077,16 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
                 };
                 messages.push(newMessage);
                 localStorage.setItem(storageKey, JSON.stringify(messages));
-                // 触发storage事件，让AIAssistant组件重新加载消息
                 window.dispatchEvent(new Event('storage'));
               }
-              
+
               // 加载多样性推荐歌曲
               appendSystemLog(`[推荐] 多样性推荐成功 - track_id: ${diversityTrack.id}《${diversityTrack.name}》`);
               const { setCurrentTrack, setIsPlaying } = usePlayerStore.getState();
               showRecommendationBubbleForNextTrackRef.current = true;
-              setCurrentTrack(diversityTrack);
+              setCurrentTrack(diversityTrack, '多样性推荐');
               setIsPlaying(true);
+              hasTriggeredDiversityRef.current = false; // 允许下次连续听满 6 首再次触发
               return; // 直接返回，不继续执行loadRandomTrack
             }
           }
@@ -749,6 +1094,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
           console.error('获取多样性推荐失败:', error);
           appendSystemLog(`[推荐] 获取多样性推荐失败: ${error instanceof Error ? error.message : String(error)}`);
         }
+        hasTriggeredDiversityRef.current = false; // 失败时也允许下次再触发
       }
     }
     
@@ -768,6 +1114,35 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
       await loadRandomTrack();
     } finally {
       loadRandomTrackInProgressRef.current = false;
+    }
+  };
+
+  // 立刻发起一次新推荐请求填充待播列表（用户等急了可点刷新）
+  const handleRefreshRecommendations = async () => {
+    const username = getCurrentUser();
+    if (!username) return;
+    setLoading(true);
+    appendSystemLog('[推荐] 点击刷新，正在重新拉取推荐…');
+    try {
+      const prefs = getUserPreferences();
+      const { recommendedTracks: newIds, recommendedScores: newScores, firstTracks: newFirstTracks } = await getRecommendations({
+        username,
+        systemType: currentSystem,
+        explicitPreferences: prefs,
+        count: 10,
+        trigger: 'user_request_rerecommend',
+      });
+      appendSystemLog(`[推荐] 刷新完成，共 ${newIds.length} 首`);
+      if (newIds.length > 0) {
+        setRecommendedTrackIds(newIds, newScores ?? undefined, newFirstTracks, '用户点击刷新');
+        setRecommendedTrackIndex(0);
+        setPlaylist(username, newIds, currentSystem).catch(() => {});
+        syncLastRecommendationVersion();
+      }
+    } catch (e) {
+      appendSystemLog(`[推荐] 刷新失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -792,6 +1167,23 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
         }
       } else {
         addFavorite(currentTrack);
+        // 仅系统 B 收藏后弹出黄色气泡；系统 A 不弹
+        if (currentSystem === 'B') {
+          const genres = currentTrack.tags?.genres ?? [];
+          const genresText = genres.length > 0 ? genres.slice(0, 3).map(tagWithChinese).join('、') : '';
+          setFavoriteTip(genresText.length > 0 ? genresText : ' '); // 最多保留前 3 个标签；空串用空格表示无风格
+          setTimeout(() => {
+            setFavoriteTip(null);
+            const tags = currentTrack.tags;
+            const allTags = [
+              ...(tags?.genres ?? []),
+              ...(tags?.instruments ?? []),
+              ...(tags?.moods ?? []),
+              ...(tags?.themes ?? []),
+            ];
+            pushWeightPlusOneMessages(allTags.map((t) => `${tagWithChinese(t)}权重+1`));
+          }, 8000);
+        }
         // 记录收藏行为
         if (username) {
           logListeningBehavior({
@@ -813,6 +1205,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
   const handleRating = async (newRating: number) => {
     if (currentTrack) {
       setRating(currentTrack.id, newRating);
+      if (newRating === 5) addFavoriteArtistAndAlbum(currentTrack);
       // 评分后隐藏提示
       setShowRatingTip(false);
       
@@ -831,14 +1224,13 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
         }).catch(err => console.error('记录评分行为失败:', err));
       }
 
-      // 如果评分为1-2星或4-5星，生成反馈（同一首歌只加一条确认消息，若 1分钟/95% 已加过则不再加）
-      if ((newRating <= 2 || newRating >= 4) && 
-          (!lastRatingForFeedbackRef.current || 
-           lastRatingForFeedbackRef.current.trackId !== currentTrack.id ||
-           lastRatingForFeedbackRef.current.rating !== newRating)) {
-        lastRatingForFeedbackRef.current = { trackId: currentTrack.id, rating: newRating };
-        if (hasAddedConfirmMessageForTrackRef.current === currentTrack.id) return;
-        try {
+      // 评分为 ≤2 或 ≥4 时生成反馈；同一首歌只弹一次，先做守卫再请求
+      if (newRating > 2 && newRating < 4) return;
+      if (bubblesShownForTrackRef.current.trackId === currentTrack.id && bubblesShownForTrackRef.current.ratingFeedback) return;
+      if (hasAddedConfirmMessageForTrackRef.current === currentTrack.id) return;
+      lastRatingForFeedbackRef.current = { trackId: currentTrack.id, rating: newRating };
+      bubblesShownForTrackRef.current = { ...bubblesShownForTrackRef.current, trackId: currentTrack.id, ratingFeedback: true };
+      try {
           const feedbackText = await aiAssistantApi.generateRatingFeedback(newRating, {
             name: currentTrack.name,
             artist: currentTrack.artist_name,
@@ -861,17 +1253,25 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
             const messages: ChatMessage[] = stored ? JSON.parse(stored) : [];
             messages.push(feedbackMessage);
             localStorage.setItem(storageKey, JSON.stringify(messages));
-            if (!isAssistantVisible) {
-              setRatingFeedbackTip({
-                text: feedbackText,
-                rating: newRating,
-                trackId: currentTrack.id,
-              });
-            }
+            setRatingFeedbackTip({
+              text: feedbackText,
+              rating: newRating,
+              trackId: currentTrack.id,
+            });
           }
-        } catch (error) {
-          console.error('生成评分反馈失败:', error);
+      } catch (error) {
+        console.error('生成评分反馈失败:', error);
+      }
+
+      // 连续3首评分≤2星时也触发不满意气泡
+      if (newRating <= 2) {
+        consecutiveLowRatingCountRef.current += 1;
+        if (consecutiveLowRatingCountRef.current >= 3 && !hasTriggeredQuickSkipTipRef.current) {
+          appendSystemLog('[推荐] 触发不满意气泡（连续3首评分≤2星）');
+          showDissatisfactionBubble();
         }
+      } else {
+        consecutiveLowRatingCountRef.current = 0;
       }
     }
   };
@@ -913,7 +1313,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
 
   if (loading && !currentTrack) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-orange-50 to-orange-100">
+      <div className="flex-1 min-h-0 flex items-center justify-center bg-gradient-to-br from-orange-50 to-orange-100">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500 mx-auto mb-4"></div>
           <p className="text-gray-600">加载中...</p>
@@ -924,7 +1324,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
 
   if (error && !currentTrack) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-orange-50 to-orange-100">
+      <div className="flex-1 min-h-0 flex items-center justify-center bg-gradient-to-br from-orange-50 to-orange-100">
         <div className="text-center">
           <p className="text-red-600 mb-4">{error}</p>
           <button
@@ -940,7 +1340,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
 
   if (!currentTrack) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center bg-gradient-to-br from-orange-50 to-orange-100 p-8 relative">
+      <div className="flex-1 min-h-0 flex flex-col items-center justify-center bg-gradient-to-br from-orange-50 to-orange-100 p-8 relative">
         {/* 仅系统 B 显示唤起小助手按钮 */}
         {currentSystem === 'B' && onToggleAssistant && !isAssistantVisible && (
           <button
@@ -1004,7 +1404,7 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
   }
 
   return (
-    <div className="flex-1 flex flex-col items-center justify-center bg-gradient-to-br from-orange-50 to-orange-100 p-8 relative">
+    <div className="flex-1 min-h-0 flex flex-col items-center justify-center bg-gradient-to-br from-orange-50 to-orange-100 p-8 relative overflow-y-auto">
       {/* 仅系统 B 显示唤起小助手按钮 */}
       {currentSystem === 'B' && onToggleAssistant && !isAssistantVisible && (
         <button
@@ -1036,11 +1436,12 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
           </div>
         ) : (
           <>
-            {/* Album Art - 永远居中、固定比例，避免歪斜；双击展开/隐藏下方 tag */}
+            {/* Album Art - 系统 A：单击展开/收起标签（标签常驻）；系统 B：双击展开/隐藏下方 tag，默认收起且不显示跟随提示 */}
             <div
               className="mb-8 cursor-pointer select-none flex justify-center items-center w-full"
-              onDoubleClick={() => setShowTags((s) => !s)}
-              title={showTags ? '双击隐藏标签与待播位置' : '双击显示标签与待播位置'}
+              onClick={currentSystem === 'A' ? () => setShowTags((s) => !s) : undefined}
+              onDoubleClick={currentSystem === 'B' ? () => setShowTags((s) => !s) : undefined}
+              title={currentSystem === 'A' ? (showTags ? '单击收起标签' : '单击展开标签') : undefined}
             >
               <div className="w-80 h-80 rounded-2xl shadow-2xl overflow-hidden flex-shrink-0 bg-gray-300">
                 {currentTrack.image ? (
@@ -1069,18 +1470,39 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
                 )}
               </p>
         
-              {/* Tags 与待播位置 - 默认隐藏，双击封面展开/隐藏 */}
-              {showTags && (
+              {/* Tags：系统 A 红框内按钮控制标签展开/收起；系统 B 双击封面显示/隐藏整块 */}
+              {(currentSystem === 'A' || showTags) && (
               <div className="flex flex-col items-center gap-3 mt-4 max-w-2xl">
-                <p className="text-xs text-gray-500 font-mono">track_id: {currentTrack.id}</p>
-                {recommendedTrackIds.length > 0 && (
-                  <p className="text-xs text-gray-500">
-                    待播列表：第 {recommendedTrackIndex + 1} 首 / 共 {recommendedTrackIds.length} 首
-                  </p>
+                {/* track_id：仅展开时显示 */}
+                {(currentSystem === 'A' ? showTags : true) && (
+                  <p className="text-xs text-gray-500 font-mono">track_id: {currentTrack.id}</p>
                 )}
+                {/* 系统 A 红框内：左侧按钮控制标签展开/收起，右侧为标签（仅展开时显示） */}
                 {currentTrack.tags && (
-              <>
-                {/* 风格：去重后展示 */}
+              <div className="flex items-start gap-2 w-full justify-center max-w-2xl">
+                {currentSystem === 'A' && (
+                  <button
+                    type="button"
+                    onClick={() => setShowTags((s) => !s)}
+                    className="flex-shrink-0 p-1 rounded text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition-colors"
+                    title={showTags ? '收起标签' : '展开标签'}
+                    aria-label={showTags ? '收起标签' : '展开标签'}
+                  >
+                    {/* 展开时显示 ▲（收起），收起时显示 ▼（展开） */}
+                    {showTags ? (
+                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20" style={{ transform: 'rotate(-90deg)' }}>
+                        <path d="M12.5 15l-5-5 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20" style={{ transform: 'rotate(-90deg)' }}>
+                        <path d="M7.5 5l5 5-5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                      </svg>
+                    )}
+                  </button>
+                )}
+                {/* 标签内容：点击按钮展开时显示，收起时隐藏 */}
+                {showTags && (
+                <div className="flex flex-col items-center gap-3 flex-1 min-w-0">
                 {currentTrack.tags.genres.length > 0 && (
                   <div className="flex flex-wrap items-center justify-center gap-2">
                     <span className="text-xs text-gray-500 shrink-0">风格</span>
@@ -1089,12 +1511,11 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
                         key={`genre-${genre}-${idx}`}
                         className="px-3 py-1 bg-orange-100 text-orange-700 rounded-full text-sm font-medium"
                       >
-                        {genre}
+                        {tagWithChinese(genre)}
                       </span>
                     ))}
                   </div>
                 )}
-                {/* 乐器：去重后展示 */}
                 {currentTrack.tags.instruments.length > 0 && (
                   <div className="flex flex-wrap items-center justify-center gap-2">
                     <span className="text-xs text-gray-500 shrink-0">乐器</span>
@@ -1104,12 +1525,11 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
                         className="px-3 py-1 text-gray-700 rounded-full text-sm font-normal"
                         style={{ backgroundColor: '#D8CECF' }}
                       >
-                        {instrument}
+                        {tagWithChinese(instrument)}
                       </span>
                     ))}
                   </div>
                 )}
-                {/* 情绪/主题：合并为一类，去重后展示（同一标签不写两遍） */}
                 {(() => {
                   const moodsThemes = [...new Set([...(currentTrack.tags.moods || []), ...(currentTrack.tags.themes || [])])];
                   if (moodsThemes.length === 0) return null;
@@ -1122,13 +1542,15 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
                           className="px-3 py-1 text-white rounded-full text-sm font-normal"
                           style={{ backgroundColor: '#91738B' }}
                         >
-                          {tag}
+                          {tagWithChinese(tag)}
                         </span>
                       ))}
                     </div>
                   );
                 })()}
-              </>
+                </div>
+                )}
+              </div>
                 )}
               </div>
             )}
@@ -1139,93 +1561,166 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
 
       {/* Progress Bar with Play Button */}
       <div className="w-full max-w-2xl mb-6 relative">
-        {/* 进度条气泡：非评分触发的（推荐理由、快速切换、多样性）仍显示在进度条上方 */}
-        {currentSystem === 'B' && !isAssistantVisible && bubbleQueue.length > 0 && bubbleQueueIndex < bubbleQueue.length && (() => {
-          const item = bubbleQueue[bubbleQueueIndex];
-          const isRatingTriggered = item.type === 'ratingFeedback' || item.type === 'oneMinute' || item.type === 'ninetyFive';
-          if (isRatingTriggered) return null; // 评分触发的气泡改在评分下方渲染
-          const baseStyle: React.CSSProperties = {
-            background: 'linear-gradient(135deg, #D8CECF 0%, #91738B 100%)',
-            maxWidth: '100%',
-            whiteSpace: 'normal',
-          };
-          const withGlow = item.type === 'quickSkip' || item.type === 'diversity';
-          return (
-            <div
-              key={item.key}
-              className={`recommendation-tip absolute bottom-full left-0 mb-2 px-3 py-2 text-white text-xs rounded-lg shadow-lg z-50 break-words w-fit max-w-full min-w-0 ${item.onClick ? 'cursor-pointer' : ''} ${withGlow ? 'animate-recommendation-glow' : ''}`}
-              style={baseStyle}
-              onClick={item.onClick}
-            >
-              {(item.showCloseButton && item.onClose) ? (
-                <div className="flex items-start gap-2">
-                  <div className="flex-1 min-w-0">
-                    <StreamingText
-                      text={item.text}
-                      onComplete={() => {
-                        setTimeout(() => {
-                          setBubbleQueueIndex((i) => (i + 1 < bubbleQueueLengthRef.current ? i + 1 : i));
-                        }, 3000);
-                      }}
-                    />
-                    {item.type === 'diversity' && item.diversityChoice && (
-                      <div className="flex flex-wrap gap-2 mt-2" onClick={(e) => e.stopPropagation()}>
+        {/* 进度条上方区域：权重+1 提示（在气泡上方一点）+ 进度条气泡；权重条 1s 后向上渐隐消失，多条按序弹出 */}
+        {(weightPlusOneQueue.length > 0 || ratingRejectTip !== null || (currentSystem === 'B' && bubbleQueue.length > 0)) && (
+          <div className="absolute bottom-full left-0 right-0 mb-2 flex flex-col-reverse items-start gap-2 z-50 min-h-0">
+            {/* 进度条气泡：每种只展示一次，前一个 5 秒消失后再展示下一个（DOM 第一项在 flex-col-reverse 下靠近进度条） */}
+            {currentSystem === 'B' && bubbleQueue.length > 0 && (() => {
+              const isDiversityOrQuickSkip = (t: BubbleItem['type']) => t === 'diversity' || t === 'quickSkip';
+              const baseStyle: React.CSSProperties = {
+                background: 'linear-gradient(135deg, #D8CECF 0%, #91738B 100%)',
+                opacity: 0.9,
+                maxWidth: '100%',
+                whiteSpace: 'normal',
+              };
+              const grayBubbleStyle: React.CSSProperties = {
+                background: 'linear-gradient(135deg, #9CA3AF 0%, #6B7280 100%)',
+                opacity: 0.9,
+                maxWidth: '100%',
+                whiteSpace: 'normal',
+              };
+              return (
+                <div className="flex flex-col-reverse items-start gap-1 min-h-0 w-full">
+                  {bubbleQueueIndex < bubbleQueue.length && (() => {
+                const item = bubbleQueue[bubbleQueueIndex];
+                const handleBubbleClick = () => {
+                  logBubbleClick(currentBubbleLogIdRef.current);
+                  item.onClick?.();
+                };
+                const bubbleStyle = item.type === 'recommendation'
+                  ? baseStyle
+                  : isDiversityOrQuickSkip(item.type)
+                    ? grayBubbleStyle
+                    : baseStyle;
+                const isQuickSkipOrDiversityBubble = isDiversityOrQuickSkip(item.type);
+                const glowClass = item.type === 'recommendation'
+                  ? 'recommendation-tip'
+                  : isQuickSkipOrDiversityBubble
+                    ? 'gray-bubble-tip'
+                    : 'recommendation-tip';
+                return (
+                  <div
+                    key={item.key}
+                    className={`${glowClass} px-3 py-2 text-white text-xs rounded-lg shadow-lg break-words w-fit max-w-full min-w-0 ${item.onClick ? 'cursor-pointer' : ''}`}
+                    style={bubbleStyle}
+                    onClick={handleBubbleClick}
+                  >
+                    {(item.showCloseButton && item.onClose) ? (
+                      <div className="flex items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <StreamingText
+                            text={item.text}
+                            onComplete={() => {}}
+                          />
+                          {(item.type === 'diversity' && item.diversityChoice) || (item.type === 'quickSkip' && item.quickSkipChoice) ? (
+                            <div className="flex flex-wrap gap-2 mt-2" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  (item.diversityChoice ?? item.quickSkipChoice)!.onFamiliar();
+                                  item.onClose?.();
+                                }}
+                                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-white/50 bg-white/20 hover:bg-white/30 text-white transition-colors"
+                              >
+                                继续听我熟悉的风格
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  (item.diversityChoice ?? item.quickSkipChoice)!.onExplore();
+                                  item.onClose?.();
+                                }}
+                                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-white/50 bg-white/20 hover:bg-white/30 text-white transition-colors"
+                              >
+                                探索新领域
+                              </button>
+                            </div>
+                          ) : item.type === 'ratingFeedback' && item.ratingChoice ? (
+                            <div className="flex flex-wrap gap-2 mt-2" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  item.ratingChoice!.onConfirm();
+                                  item.onClose?.();
+                                }}
+                                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-white/50 bg-white/20 hover:bg-white/30 text-white transition-colors opacity-90"
+                              >
+                                是这样的!
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  item.ratingChoice!.onReject();
+                                  item.onClose?.();
+                                }}
+                                className="px-3 py-1.5 text-xs font-medium rounded-lg border border-white/50 bg-white/20 hover:bg-white/30 text-white transition-colors opacity-90"
+                              >
+                                说的不对
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            item.diversityChoice!.onFamiliar();
                             item.onClose?.();
+                            if (item.onClick) handleBubbleClick();
                           }}
-                          className="px-2 py-1 text-xs rounded border border-white/80 text-white bg-white/10 hover:bg-white/20 transition-colors"
+                          className="text-white/80 hover:text-white transition-colors shrink-0"
                         >
-                          继续听我熟悉的风格
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            item.diversityChoice!.onExplore();
-                            item.onClose?.();
-                          }}
-                          className="px-2 py-1 text-xs rounded border border-white/80 text-white bg-white/10 hover:bg-white/20 transition-colors"
-                        >
-                          探索新领域
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
                         </button>
                       </div>
+                    ) : (
+                      <>
+                        <StreamingText
+                          text={item.text}
+                          onComplete={() => {
+                            if (item.type === 'recommendation') setRecommendationTipSuffix('点击和我聊聊吧~');
+                          }}
+                        />
+                        {item.type === 'recommendation' && recommendationTipSuffix && <span className="block mt-1">{recommendationTipSuffix}</span>}
+                      </>
                     )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      item.onClose?.();
-                      if (item.onClick) item.onClick();
-                    }}
-                    className="text-white/80 hover:text-white transition-colors shrink-0"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
+                );
+              })()}
                 </div>
-              ) : (
-                <>
-                  <StreamingText
-                    text={item.text}
-                    onComplete={() => {
-                      if (item.type === 'recommendation') setRecommendationTipSuffix('点击和我聊聊吧~');
-                      setTimeout(() => {
-                        setBubbleQueueIndex((i) => (i + 1 < bubbleQueueLengthRef.current ? i + 1 : i));
-                      }, 3000);
-                    }}
-                  />
-                  {item.type === 'recommendation' && recommendationTipSuffix && <span className="block mt-1">{recommendationTipSuffix}</span>}
-                </>
-              )}
-            </div>
-          );
-        })()}
+              );
+            })()}
+            {/* 评分气泡点「说的不对」后的短暂文案 */}
+            {ratingRejectTip && (
+              <div className="py-1">
+                <span className="text-[11px] text-gray-500">{ratingRejectTip}</span>
+              </div>
+            )}
+            {/* 权重+1：在气泡上方一点，无框主题色渐变，1s 后向上渐隐消失，多条按序弹出 */}
+            {weightPlusOneQueue.length > 0 && (
+              <div
+                className={`py-1 transition-all duration-300 ease-out ${
+                  weightTipExiting ? 'opacity-0 -translate-y-3' : 'opacity-100 translate-y-0'
+                }`}
+              >
+                <span
+                  className="text-[11px] font-medium bg-clip-text text-transparent"
+                  style={{
+                    backgroundImage: 'linear-gradient(90deg, #91738B 0%, #D8CECF 100%)',
+                    WebkitBackgroundClip: 'text',
+                  }}
+                >
+                  <TextWithBoldTags text={weightPlusOneQueue[0]} as="span" />
+                </span>
+              </div>
+            )}
+          </div>
+        )}
         <div className="flex items-center gap-1.5">
           <button
             onClick={handlePlayPause}
@@ -1341,31 +1836,55 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
         preload="metadata"
       />
 
+      {/* 系统眼中的你（我的偏好图）弹窗 - 与 AIAssistant 内一致 */}
+      {showSystemEyesModal && <SystemEyesModal onClose={() => setShowSystemEyesModal(false)} />}
+
       {/* Actions */}
       <div className="flex flex-row items-center justify-center gap-6 w-full max-w-2xl flex-wrap">
-        {/* Favorite Button */}
-        <button
-          onClick={handleFavorite}
-          className="px-3 py-1.5 rounded-lg bg-white text-gray-700 hover:bg-gray-50 text-sm transition-all"
-        >
-          <span className="flex items-center gap-1.5">
-            {isFavorited ? (
-              <>
-                <svg className="w-4 h-4" fill="black" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z" clipRule="evenodd" />
-                </svg>
-                已收藏
-              </>
-            ) : (
-              <>
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
-                </svg>
-                收藏
-              </>
-            )}
-          </span>
-        </button>
+        {/* Favorite Button + 收藏后黄色气泡 */}
+        <div className="relative">
+          <button
+            onClick={handleFavorite}
+            className="px-3 py-1.5 rounded-lg bg-white text-gray-700 hover:bg-gray-50 text-sm transition-all"
+          >
+            <span className="flex items-center gap-1.5">
+              {isFavorited ? (
+                <>
+                  <svg className="w-4 h-4" fill="black" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z" clipRule="evenodd" />
+                  </svg>
+                  已收藏
+                </>
+              ) : (
+                <>
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+                  </svg>
+                  收藏
+                </>
+              )}
+            </span>
+          </button>
+          {favoriteTip && (
+            <div
+              className="favorite-tip absolute top-full left-1/2 -translate-x-1/2 mt-2 px-3 py-2 text-white text-xs rounded-lg shadow-lg z-50 min-w-[13.2rem] max-w-[22rem] break-words"
+              style={{ backgroundColor: '#C4B59A', opacity: 0.9 }}
+            >
+              <p className="mb-2">
+                {favoriteTip.trim() ? `我识别到你最喜欢的${favoriteTip}风格，下一首会为你优先推荐该风格哦～` : '我识别到你最喜欢的**风格，下一首会为你优先推荐该风格哦～'}
+              </p>
+              <button
+                type="button"
+                onClick={() => { setShowSystemEyesModal(true); setFavoriteTip(null); }}
+                className="w-full py-1.5 rounded-md text-xs font-medium border border-white/50 bg-white/20 hover:bg-white/30 transition-colors"
+              >
+                我的偏好图
+              </button>
+              <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 rotate-45" style={{ backgroundColor: '#C4B59A' }} />
+            </div>
+          )}
+          {/* 收藏气泡消失后原地弹出：无框主题色渐变「Tag权重+1」，每条 1 秒，多条按序 */}
+        </div>
 
         {/* Rating */}
         <div ref={ratingRef} className="flex items-center gap-1.5 relative">
@@ -1387,53 +1906,37 @@ export default function MusicPlayer({ isAssistantVisible = false, onToggleAssist
           ))}
           {/* 评分提示气泡 - 系统 A/B 未评分点下一首时均显示 */}
           {showRatingTip && (
-            <div className="absolute top-full left-0 mt-2 px-3 py-2 bg-gray-800 text-white text-xs rounded-lg shadow-lg z-50 animate-pulse min-w-[8rem]">
+            <div className="absolute top-full left-0 mt-2 px-3 py-2 bg-gray-800 text-white text-xs rounded-lg shadow-lg z-50 animate-pulse min-w-[8rem] opacity-90">
               必须先给当前歌曲评分才能推荐下一首哦
               <div className="absolute -top-1 left-4 w-2 h-2 bg-gray-800 transform rotate-45"></div>
             </div>
           )}
         </div>
 
-        {/* Next Song Button */}
-        <button
-          onClick={handleNext}
-          disabled={!currentTrack}
-          className="px-3 py-1.5 rounded-lg bg-white text-gray-700 hover:bg-gray-50 text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed relative z-10"
-        >
-          推荐下一首&gt;
-        </button>
+        {/* Next Song Button + 刷新推荐 */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleNext}
+            disabled={!currentTrack}
+            className="px-3 py-1.5 rounded-lg bg-white text-gray-700 hover:bg-gray-50 text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed relative z-10"
+          >
+            推荐下一首&gt;
+          </button>
+          <button
+            type="button"
+            onClick={handleRefreshRecommendations}
+            disabled={loading}
+            title="重新拉取推荐，填充待播列表"
+            className="w-9 h-9 rounded-full bg-white text-gray-600 hover:bg-gray-50 hover:text-gray-800 border border-gray-200 flex items-center justify-center transition-all disabled:opacity-50 disabled:cursor-not-allowed relative z-10"
+            aria-label="刷新推荐"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </button>
+        </div>
       </div>
 
-      {/* 评分触发的气泡：显示在评分下方 */}
-      {currentSystem === 'B' && !isAssistantVisible && bubbleQueue.length > 0 && bubbleQueueIndex < bubbleQueue.length && (() => {
-        const item = bubbleQueue[bubbleQueueIndex];
-        const isRatingTriggered = item.type === 'ratingFeedback' || item.type === 'oneMinute' || item.type === 'ninetyFive';
-        if (!isRatingTriggered) return null;
-        const baseStyle: React.CSSProperties = {
-          background: 'linear-gradient(135deg, #D8CECF 0%, #91738B 100%)',
-          maxWidth: '100%',
-          whiteSpace: 'normal',
-        };
-        return (
-          <div className="w-full max-w-2xl mt-3 flex justify-center">
-            <div
-              key={item.key}
-              className={`recommendation-tip px-3 py-2 text-white text-xs rounded-lg shadow-lg z-50 break-words w-full max-w-full min-w-0 ${item.onClick ? 'cursor-pointer' : ''}`}
-              style={baseStyle}
-              onClick={item.onClick}
-            >
-              <StreamingText
-                text={item.text}
-                onComplete={() => {
-                  setTimeout(() => {
-                    setBubbleQueueIndex((i) => (i + 1 < bubbleQueueLengthRef.current ? i + 1 : i));
-                  }, 3000);
-                }}
-              />
-            </div>
-          </div>
-        );
-      })()}
     </div>
   );
 }

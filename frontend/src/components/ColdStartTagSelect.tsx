@@ -114,9 +114,9 @@ export default function ColdStartTagSelect({ onComplete, onClose, initialSelecte
     return out;
   }, [tagOptions, search]);
 
-  /** 三列：风格 | 乐器 | 情绪/主题（moods + themes 合并） */
+  /** 三列：风格 | 乐器 | 情绪/主题（moods + themes 合并，保持按歌曲数量倒序，不按字母排序） */
   const columnDefs: { key: 'genres' | 'instruments' | 'moods_themes'; label: string; color: string; tags: string[] }[] = useMemo(() => {
-    const moodsThemes = [...new Set([...(filteredOptions.moods || []), ...(filteredOptions.themes || [])])].sort();
+    const moodsThemes = [...new Set([...(filteredOptions.moods || []), ...(filteredOptions.themes || [])])];
     return [
       { key: 'genres', label: '风格', color: CATEGORY_COLORS.genres, tags: filteredOptions.genres || [] },
       { key: 'instruments', label: '乐器', color: CATEGORY_COLORS.instruments, tags: filteredOptions.instruments || [] },

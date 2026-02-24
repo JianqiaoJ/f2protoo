@@ -1,16 +1,18 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { usePlayerStore } from '../store';
 import { aiAssistantApi, ChatMessage } from '../api/aiAssistant';
 import { getUserStorageKey, getCurrentUser, getOrCreateConversationSessionId } from '../utils/storage';
-import { appendConversationMessage } from '../api/conversation';
+import { appendConversationMessage, recordConversationButtonChoice } from '../api/conversation';
+import { logDialogButtons, logDialogButtonClick } from '../api/dialogButtonLog';
 import { jamendoApi } from '../api';
 import { getReportDistinctTags } from '../data/reportDistinctTags';
-import { getRecommendations, getRecommendWhy } from '../api/recommend';
+import { getRecommendations, getRecommendWhy, logWhyThisTrack } from '../api/recommend';
 import { setPlaylist } from '../api/playlist';
 import { appendSystemLog } from '../api/logs';
-import { getPreferenceOperationLabel } from '../api/preferences';
-import { tagToChinese } from '../utils/tagToChinese';
+import { getPreferenceOperationLabel, getUserPreferences as fetchUserPreferencesFromBackend } from '../api/preferences';
+import { tagWithChinese } from '../utils/tagToChinese';
 import SystemEyesModal from './SystemEyesModal';
+import { TextWithBoldTags } from './TextWithBoldTags';
 
 // 从localStorage加载消息历史（按用户隔离）
 const loadMessagesFromStorage = (): ChatMessage[] => {
@@ -31,7 +33,6 @@ const loadMessagesFromStorage = (): ChatMessage[] => {
           return !!(msg.content || (msg.buttons && Array.isArray(msg.buttons) && msg.buttons.length > 0));
         });
         if (validMessages.length > 0) {
-          console.log('Loaded messages from storage:', validMessages.length, 'messages');
           return validMessages;
         }
       }
@@ -59,7 +60,6 @@ const saveMessagesToStorage = (messages: ChatMessage[]) => {
     if (validMessages.length > 0) {
       const storageKey = getUserStorageKey('ai-assistant-messages');
       localStorage.setItem(storageKey, JSON.stringify(validMessages));
-      console.log('Saved messages to storage:', validMessages.length, 'messages');
     }
   } catch (error) {
     console.error('Failed to save messages to storage:', error);
@@ -69,10 +69,12 @@ const saveMessagesToStorage = (messages: ChatMessage[]) => {
 interface AIAssistantProps {
   onToggleAssistant?: () => void;
   onFirstRecommendation?: () => void; // 第一次推荐后的回调
+  /** 为 true 时不应用「无操作 1 分钟收起」逻辑（如系统 B 冷启动阶段） */
+  disableIdleClose?: boolean;
 }
 
-export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }: AIAssistantProps = {}) {
-  const { currentTrack, ratings, getRating, addUserPreference, removeUserPreferenceBatch, getUserPreferences, isPlaying, trackIds, setCurrentTrack, setIsPlaying, setLoading, setRecommendedTrackIds, setRecommendedTrackIndex, syncLastRecommendationVersion, currentSystem } = usePlayerStore();
+export default function AIAssistant({ onToggleAssistant, onFirstRecommendation, disableIdleClose = false }: AIAssistantProps = {}) {
+  const { currentTrack, ratings, getRating, addUserPreference, removeUserPreferenceBatch, getUserPreferences, isPlaying, trackIds, setCurrentTrack, setIsPlaying, setLoading, setRecommendedTrackIds, setRecommendedTrackIndex, syncLastRecommendationVersion, currentSystem, pushWeightPlusOneMessages } = usePlayerStore();
   const [messages, setMessages] = useState<ChatMessage[]>(loadMessagesFromStorage());
   const lastSyncedToBackendRef = useRef(0);
 
@@ -81,13 +83,15 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
     lastSyncedToBackendRef.current = messages.length;
   }, []);
 
-  // 监听 currentTrack 变化：重新加载消息（推荐解释、评分反馈），并添加歌曲分割线（切换歌曲时）
+  // 监听 currentTrack.id 变化：重新加载消息（推荐解释、评分反馈），并添加歌曲分割线（切换歌曲时）
+  // 仅依赖 trackId 避免因 currentTrack 对象引用变化导致重复执行、频繁 setMessages 和重渲染
+  const currentTrackId = currentTrack?.id ?? '';
   useEffect(() => {
-    if (!currentTrack) return;
+    if (!currentTrackId) return;
     const loadedMessages = loadMessagesFromStorage();
-    const isTrackSwitch = currentTrack.id !== lastTrackIdRef.current;
+    const isTrackSwitch = currentTrackId !== lastTrackIdRef.current;
     let nextMessages = loadedMessages;
-    if (isTrackSwitch && lastTrackIdRef.current) {
+    if (currentTrack && isTrackSwitch && lastTrackIdRef.current) {
       const dividerMessage: ChatMessage = {
         role: 'assistant',
         content: `━━━━━━━━━━━━━━━━━━━━\n🎵 ${currentTrack.name} - ${currentTrack.artist_name}`,
@@ -95,27 +99,30 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
       nextMessages = [...loadedMessages, dividerMessage];
     }
     if (isTrackSwitch) {
-      lastTrackIdRef.current = currentTrack.id;
-      lastRatingRef.current = getRating(currentTrack.id);
+      lastTrackIdRef.current = currentTrackId;
+      lastRatingRef.current = currentTrack ? getRating(currentTrack.id) : 0;
     }
     setMessages(nextMessages);
-    // 不在此处更新 lastSyncedToBackendRef，否则从 localStorage 新加载的消息（如推荐解释、评分反馈）会被误认为已同步，导致不再写入 user_conversations / user_conversations_history
-  }, [currentTrack, getRating]);
+  }, [currentTrackId, currentTrack, getRating]);
 
-  // 监听localStorage变化，实时更新消息（用于接收评分反馈）
+  // 监听 localStorage 变化，实时更新消息（用于接收评分反馈）
+  // 仅在实际内容变化时 setMessages，避免每 500ms 新数组引用导致无限重渲染
   useEffect(() => {
     const handleStorageChange = () => {
       const loadedMessages = loadMessagesFromStorage();
-      setMessages(loadedMessages);
-      // 不在此处更新 lastSyncedToBackendRef，否则仅存在于 localStorage 的新消息（如评分反馈等）会被误认为已同步，导致不再写入后端
+      setMessages((prev) => {
+        if (prev.length !== loadedMessages.length) return loadedMessages;
+        const same = prev.every((p, i) => {
+          const n = loadedMessages[i];
+          return n && p.role === n.role && p.content === n.content && (p.buttons?.length ?? 0) === (n.buttons?.length ?? 0);
+        });
+        return same ? prev : loadedMessages;
+      });
     };
-    
-    // 监听storage事件（跨标签页）
+
     window.addEventListener('storage', handleStorageChange);
-    
-    // 定期检查localStorage（同标签页）
-    const interval = setInterval(handleStorageChange, 500);
-    
+    const interval = setInterval(handleStorageChange, 10000);
+
     return () => {
       window.removeEventListener('storage', handleStorageChange);
       clearInterval(interval);
@@ -149,9 +156,40 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
   const [showSystemEyesModal, setShowSystemEyesModal] = useState(false);
   const [preferenceRememberedTip, setPreferenceRememberedTip] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const idleCloseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onToggleAssistantRef = useRef(onToggleAssistant);
+  onToggleAssistantRef.current = onToggleAssistant;
+
+  /** Seren 展开后：1 分钟内在小助手区域无操作（无悬浮、无滚动、无点击）则自动收起；有操作则重新计时 */
+  const cancelIdleCloseTimer = () => {
+    if (idleCloseTimeoutRef.current) {
+      clearTimeout(idleCloseTimeoutRef.current);
+      idleCloseTimeoutRef.current = null;
+    }
+  };
+
+  const scheduleIdleCloseRef = useRef<() => void>(() => {});
+  scheduleIdleCloseRef.current = () => {
+    cancelIdleCloseTimer();
+    // 以下任一情况不自动收起：冷启动阶段、「系统眼中的你」弹窗打开、正在加载回复（三个点）
+    if (disableIdleClose || showSystemEyesModal || isLoading || !onToggleAssistantRef.current) return;
+    idleCloseTimeoutRef.current = setTimeout(() => {
+      idleCloseTimeoutRef.current = null;
+      onToggleAssistantRef.current?.();
+    }, 60000); // 1 分钟无操作则收起
+  };
+
+  const resetIdleCloseTimer = useCallback(() => {
+    scheduleIdleCloseRef.current?.();
+  }, []);
+
+  useEffect(() => {
+    scheduleIdleCloseRef.current?.();
+    return () => cancelIdleCloseTimer();
+  }, [disableIdleClose, showSystemEyesModal, isLoading]); // 弹窗关闭或加载结束后重新开始计时
 
   const showPreferenceRememberedTip = () => {
-    setPreferenceRememberedTip('正在更新您的偏好...');
+    setPreferenceRememberedTip('正在为您更新偏好');
     setTimeout(() => setPreferenceRememberedTip(null), 3000);
   };
 
@@ -161,14 +199,107 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
     setTransientButtonTip({ messageIndex, text });
     setTimeout(() => setTransientButtonTip(null), 2500);
   };
+
+  /** 「是这样的！」后：通知消失 3 秒后向进度条上方队列推送「英文 中文权重+1」，由 MusicPlayer 按序展示并向上渐隐 */
+  const showWeightPlusOneTips = (tagLabels: string[]) => {
+    if (tagLabels.length === 0) return;
+    const queue = tagLabels.map((t) => `${tagWithChinese(t)}权重+1`);
+    setTimeout(() => pushWeightPlusOneMessages(queue), 3000);
+  };
   const lastTrackIdRef = useRef<string>(''); // 记录上次的trackId
   const lastRatingRef = useRef<number>(0); // 记录上次的评分，避免重复推送
   const hasShownWelcomeMessageRef = useRef<boolean>(false); // 记录是否已显示欢迎消息
   const hasTriggeredFirstRecommendationRef = useRef<boolean>(false); // 记录是否已触发第一次推荐
   const chatCancelRequestedRef = useRef(false); // 用户双击加载气泡停止加载时设为 true，请求返回后不再追加回复
+  const buttonLogIdByKeyRef = useRef<Record<string, number>>({});
+  const lastLoggedButtonKeysRef = useRef<Record<string, boolean>>({});
+
+  /** 根据按钮 action 返回点击后展示的「下一个文字」（用于记录） */
+  const getNextTextForButtonAction = (action: string): string => {
+    if (/^confirm/.test(action) || action === 'confirm') return '正在为您更新偏好';
+    if (/^reject/.test(action)) return '好的，我不会据此修改您的偏好。';
+    if (action === 'continue') return '好的，我会继续为您推荐音乐。';
+    return '';
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  /** 识别用户是否在要求「近n年」「某年后的歌」等按年份筛选（系统暂不支持） */
+  const isYearFilterRequest = (input: string): boolean => {
+    const t = input.trim();
+    return /近\s*\d*\s*年|最近\s*\d*\s*年|近几年|近年|\d{4}\s*年|(\d{2,4})\s*年.*(歌|曲|音乐)|按年份|按年代|年份|年代筛选/i.test(t);
+  };
+
+  /** 系统无法支持时的统一流程：告知暂时无法支持 + 用类似风格推荐并播放 */
+  const runUnsupportedFlowAndRecommendSimilar = async (
+    userInput: string,
+    reason: 'tags_not_in_library' | 'year_filter',
+    isFirstResponse: boolean
+  ) => {
+    const availableTags = getReportDistinctTags();
+    const { reply, similarTags } = await aiAssistantApi.getUnsupportedReplyWithSimilar(userInput, availableTags, reason);
+    const explicitPrefs = {
+      genres: similarTags.genres,
+      instruments: similarTags.instruments,
+      moods: similarTags.moods,
+      themes: similarTags.themes,
+    };
+    setLoading(true);
+    try {
+      const username = getCurrentUser();
+      if (!username) {
+        setMessages((prev) => [...prev, { role: 'assistant', content: reply + '\n\n（请先登录后为你推荐类似风格）', fromSeren: true }]);
+        setLoading(false);
+        return;
+      }
+      const { recommendedTracks: recIds, recommendedScores: recScores, firstTrack: firstFromApi, firstTracks: firstTracks } = await getRecommendations({
+        username,
+        systemType: currentSystem,
+        explicitPreferences: explicitPrefs,
+        count: 3,
+        trigger: 'user_expressed_preference',
+        triggerUserMessage: userInput,
+      });
+      const similarParts: string[] = [];
+      if (similarTags.genres.length > 0) similarParts.push(`风格 ${similarTags.genres.map(tagWithChinese).join('、')}`);
+      if (similarTags.instruments.length > 0) similarParts.push(`乐器 ${similarTags.instruments.map(tagWithChinese).join('、')}`);
+      if (similarTags.moods.length > 0) similarParts.push(`情绪 ${similarTags.moods.map(tagWithChinese).join('、')}`);
+      if (similarTags.themes.length > 0) similarParts.push(`主题 ${similarTags.themes.map(tagWithChinese).join('、')}`);
+      const similarLine = similarParts.length > 0 ? similarParts.join('，') + '。' : '';
+      const content = recIds.length > 0
+        ? reply + (similarLine ? '\n\n类似风格为：' + similarLine + '正在为你重新推荐～' : '\n\n正在为你重新推荐～')
+        : reply + (similarLine ? '\n\n类似风格为：' + similarLine + '（推荐暂无结果，请稍后再试）' : '\n\n（推荐暂无结果，请稍后再试）');
+      const systemReply: ChatMessage = { role: 'assistant', content, fromSeren: true };
+      setMessages((prev) => {
+        const next = [...prev, systemReply];
+        saveMessagesToStorage(next);
+        return next;
+      });
+      if (recIds.length > 0) {
+        setRecommendedTrackIds(recIds, recScores, firstTracks, '类似风格推荐');
+        setRecommendedTrackIndex(1);
+        setPlaylist(username, recIds, currentSystem).catch(() => {});
+        syncLastRecommendationVersion();
+        let firstTrack = firstFromApi ?? firstTracks?.[0] ?? null;
+        if (!firstTrack && recIds[0]) {
+          firstTrack = await jamendoApi.getTrackById(recIds[0]).catch(() => null);
+        }
+        if (firstTrack) {
+          setCurrentTrack(firstTrack);
+          setIsPlaying(true);
+        }
+        if (isFirstResponse && currentSystem === 'B') {
+          setTimeout(() => onFirstRecommendation?.(), 1000);
+        }
+      }
+    } catch (err) {
+      console.warn('类似风格推荐失败:', err);
+      setMessages((prev) => [...prev, { role: 'assistant', content: reply, fromSeren: true }]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -186,28 +317,82 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
       const role = msg?.role;
       if (role !== 'user' && role !== 'assistant') continue;
       const content = msg?.content ?? '';
-      appendConversationMessage(user, sessionId, role, content, i).catch(() => {});
+      const message_buttons = role === 'assistant' && msg?.buttons?.length ? msg.buttons : undefined;
+      appendConversationMessage(user, sessionId, role, content, i, message_buttons).catch(() => {});
     }
     lastSyncedToBackendRef.current = messages.length;
   }, [messages]);
 
-  // 首次登录或清除记录后显示引导消息
+  // 对话框按钮记录：每条带按钮的消息首次展示时写入「展示的按钮（文字）」并记录 log_id 供点击时更新
   useEffect(() => {
-    if (messages.length === 0 && !hasShownWelcomeMessageRef.current && trackIds.length > 0) {
-      hasShownWelcomeMessageRef.current = true;
-      
+    const username = getCurrentUser();
+    const sessionId = getOrCreateConversationSessionId();
+    if (!username || !sessionId) return;
+    messages.forEach((msg, i) => {
+      if (!msg?.buttons?.length) return;
+      const key = `${sessionId}-${i}`;
+      if (lastLoggedButtonKeysRef.current[key]) return;
+      lastLoggedButtonKeysRef.current[key] = true;
+      logDialogButtons({
+        username,
+        session_id: sessionId,
+        message_sequence_no: i,
+        buttons: msg.buttons.map((b) => ({ label: b.label, action: b.action })),
+      }).then((logId) => {
+        if (logId != null) buttonLogIdByKeyRef.current[key] = logId;
+      });
+    });
+  }, [messages]);
+
+  // 首次登录或清除记录后显示引导消息（例句由 LLM 根据该用户在 DB 的偏好生成）
+  useEffect(() => {
+    if (messages.length !== 0 || hasShownWelcomeMessageRef.current || trackIds.length === 0) return;
+    hasShownWelcomeMessageRef.current = true;
+
+    const run = async () => {
+      const baseContent = `我是你的音乐推荐小助手Seren ^_^，欢迎第一次访问。为了更好地为你开始推荐，请用一句话描述：
+🎵 你喜欢的音乐风格（genre）
+🎸 你喜欢的歌曲配(乐)器（instrument）
+💭 你当前的情境或心情（mood/theme）
+`;
+      let exampleLine = '例如："我喜欢摇滚和电子音乐，喜欢钢琴，现在想放松"';
+      const currentUser = getCurrentUser();
+      if (currentUser) {
+        try {
+          const res = await fetchUserPreferencesFromBackend(currentUser, currentSystem);
+          const prefs = res?.preferences;
+          if (prefs && (prefs.genres?.length || prefs.instruments?.length || prefs.moods?.length || prefs.themes?.length)) {
+            exampleLine = await aiAssistantApi.generateColdStartExample({
+              genres: prefs.genres ?? [],
+              instruments: prefs.instruments ?? [],
+              moods: prefs.moods ?? [],
+              themes: prefs.themes ?? [],
+            });
+          } else {
+            exampleLine = await aiAssistantApi.generateColdStartExample({
+              genres: [],
+              instruments: [],
+              moods: [],
+              themes: [],
+            });
+          }
+        } catch (_) {
+          exampleLine = await aiAssistantApi.generateColdStartExample({
+            genres: [],
+            instruments: [],
+            moods: [],
+            themes: [],
+          }).catch(() => exampleLine);
+        }
+      }
       const welcomeMessage: ChatMessage = {
         role: 'assistant',
-        content: `我是你的音乐推荐小助手Seren ^_^，欢迎第一次访问。为了更好地为你开始推荐，请用一句话描述：
-🎵 你喜欢的音乐风格（genre）
-🎸 你喜欢的（instrument）
-💭 你当前的情境或心情（mood/theme）
-例如："我喜欢摇滚和电子音乐，喜欢钢琴，现在想放松"`,
+        content: baseContent + exampleLine,
       };
-      
       setMessages([welcomeMessage]);
-    }
-  }, [messages.length, trackIds.length]);
+    };
+    run();
+  }, [messages.length, trackIds.length, currentSystem]);
 
   // 分割线已在上面「监听 currentTrack 变化」的 effect 中与加载消息一起处理，此处不再重复
 
@@ -223,6 +408,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
 
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
+    cancelIdleCloseTimer(); // 用户发消息后取消「1 分钟无发消息则收起」
 
     const userMessage: ChatMessage = {
       role: 'user',
@@ -254,9 +440,23 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
         // 首次回复，需要映射到raw.tsv中的标签并推荐歌曲
         try {
           const availableTags = getReportDistinctTags();
+          // 用户要求「近n年」等按年份筛选：系统暂不支持，告知并推荐类似风格
+          if (isYearFilterRequest(userInput)) {
+            await runUnsupportedFlowAndRecommendSimilar(userInput, 'year_filter', true);
+            return;
+          }
           // 调用LLM将用户输入映射到报告中的 distinct tags（不得编造）
           const mappedTags = await aiAssistantApi.mapUserInputToTags(userInput, availableTags);
-          
+          const hasMappedTagsFirst =
+            mappedTags.genres.length > 0 ||
+            mappedTags.instruments.length > 0 ||
+            mappedTags.moods.length > 0 ||
+            mappedTags.themes.length > 0;
+          // 用户想要的风格/乐器/曲风库里没有：告知暂时无法支持并推荐类似风格
+          if (!hasMappedTagsFirst) {
+            await runUnsupportedFlowAndRecommendSimilar(userInput, 'tags_not_in_library', true);
+            return;
+          }
           // 更新用户偏好记忆（先保存偏好），记录为首次登录对话
           const firstLoginOpt = { operation: 'first_login' as const, conversationContent: userInput };
           if (mappedTags.genres.length > 0) {
@@ -322,14 +522,14 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                     // 系统 B 冷启动：回复「识别到的用户偏好」+「推荐当前这首歌的理由」，语言热情、简洁、优美；展示完后收起 Seren
                     const preferenceParts: string[] = [];
                     if (mappedTags.genres.length > 0) {
-                      preferenceParts.push(`风格 ${mappedTags.genres.map(tagToChinese).join('、')}`);
+                      preferenceParts.push(`风格 ${mappedTags.genres.map(tagWithChinese).join('、')}`);
                     }
                     if (mappedTags.instruments.length > 0) {
-                      preferenceParts.push(`乐器 ${mappedTags.instruments.map(tagToChinese).join('、')}`);
+                      preferenceParts.push(`乐器 ${mappedTags.instruments.map(tagWithChinese).join('、')}`);
                     }
                     const moodThemeParts: string[] = [];
-                    if (mappedTags.moods.length > 0) moodThemeParts.push(...mappedTags.moods.map(tagToChinese));
-                    if (mappedTags.themes.length > 0) moodThemeParts.push(...mappedTags.themes.map(tagToChinese));
+                    if (mappedTags.moods.length > 0) moodThemeParts.push(...mappedTags.moods.map(tagWithChinese));
+                    if (mappedTags.themes.length > 0) moodThemeParts.push(...mappedTags.themes.map(tagWithChinese));
                     if (moodThemeParts.length > 0) {
                       preferenceParts.push(`情绪·主题 ${[...new Set(moodThemeParts)].join('、')}`);
                     }
@@ -431,22 +631,61 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
         setIsLoading(false);
         return;
       } else {
-        // 非首次回复，先尝试提取偏好并映射到raw.tsv标签
+        // 非首次回复：若用户要求「近n年」等按年份筛选，直接告知暂不支持并推荐类似风格（不依赖偏好提取）
+        if (isYearFilterRequest(userInput)) {
+          await runUnsupportedFlowAndRecommendSimilar(userInput, 'year_filter', false);
+          setIsLoading(false);
+          return;
+        }
+        // 先尝试提取偏好并映射到raw.tsv标签
         try {
           // 先提取用户输入中的偏好关键词
           const extractedPrefs = await aiAssistantApi.extractPreferences(userInput);
 
           // 检查是否有提取到偏好
-          const hasExtractedPrefs = 
+          const hasExtractedPrefs =
             extractedPrefs.genres.length > 0 ||
             extractedPrefs.instruments.length > 0 ||
             extractedPrefs.moods.length > 0 ||
             extractedPrefs.themes.length > 0;
+          // 当 LLM 未识别出偏好但用户明确说「不喜欢」时，用兜底解析结果当作有效偏好进入厌恶分支
+          let effectivePrefs = extractedPrefs;
+          let effectiveHasExtracted = hasExtractedPrefs;
+          if (!hasExtractedPrefs && /不喜欢|讨厌|别推荐|不要/.test(userInput.trim())) {
+            const availableTagsForFallback = getReportDistinctTags();
+            const fb = aiAssistantApi.parseDislikeFallback(userInput, availableTagsForFallback);
+            if (fb.genres.length > 0 || fb.instruments.length > 0 || fb.moods.length > 0 || fb.themes.length > 0) {
+              effectiveHasExtracted = true;
+              effectivePrefs = { isDislike: true, genres: fb.genres, instruments: fb.instruments, moods: fb.moods, themes: fb.themes };
+            }
+          }
 
-          if (hasExtractedPrefs) {
+          if (effectiveHasExtracted) {
             const availableTags = getReportDistinctTags();
-            // 将提取的偏好映射到报告中的 distinct tags（不得编造）
-            const mappedTags = await aiAssistantApi.mapUserInputToTags(userInput, availableTags);
+            // 厌恶偏好：用 extract 结果直接解析为库内 tag，避免 mapUserInputToTags 对「不喜欢pop」等整句返回空
+            const dislikeMapped = effectivePrefs.isDislike
+              ? aiAssistantApi.resolveExtractedTagsToLibrary(effectivePrefs, availableTags)
+              : null;
+            const hasDislikeMappedTags = dislikeMapped
+              ? (dislikeMapped.genres.length > 0 || dislikeMapped.instruments.length > 0 || dislikeMapped.moods.length > 0 || dislikeMapped.themes.length > 0)
+              : false;
+            // 不喜欢解析兜底：LLM 未提取出标签时，从输入中按顿号/逗号分段匹配曲库标签（如「不喜欢金属、摇滚」）
+            const dislikeFallback = effectivePrefs.isDislike && !hasDislikeMappedTags
+              ? aiAssistantApi.parseDislikeFallback(userInput, availableTags)
+              : null;
+            const hasDislikeFallbackTags = dislikeFallback
+              ? (dislikeFallback.genres.length > 0 || dislikeFallback.instruments.length > 0 || dislikeFallback.moods.length > 0 || dislikeFallback.themes.length > 0)
+              : false;
+
+            let mappedTags: { genres: string[]; instruments: string[]; moods: string[]; themes: string[] };
+            if (hasDislikeMappedTags && dislikeMapped) {
+              mappedTags = dislikeMapped;
+            } else if (hasDislikeFallbackTags && dislikeFallback) {
+              mappedTags = dislikeFallback;
+            } else {
+              // 将提取的偏好映射到报告中的 distinct tags（不得编造）
+              mappedTags = await aiAssistantApi.mapUserInputToTags(userInput, availableTags);
+            }
 
             // 检查映射后是否有有效的标签
             const hasMappedTags = 
@@ -455,26 +694,60 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
               mappedTags.moods.length > 0 ||
               mappedTags.themes.length > 0;
 
+            // 用户表达的偏好库里没有，或要求近n年：告知暂时无法支持并推荐类似风格
+            if (!hasMappedTags) {
+              const reason = isYearFilterRequest(userInput) ? 'year_filter' as const : 'tags_not_in_library' as const;
+              const UNSUPPORTED_FLOW_TIMEOUT_MS = 20000;
+              const timeoutPromise = new Promise<void>((_, reject) =>
+                setTimeout(() => reject(new Error('unsupported_flow_timeout')), UNSUPPORTED_FLOW_TIMEOUT_MS)
+              );
+              try {
+                await Promise.race([runUnsupportedFlowAndRecommendSimilar(userInput, reason, false), timeoutPromise]);
+              } catch (timeoutOrErr) {
+                const fallbackReply: ChatMessage = {
+                  role: 'assistant',
+                  content: '【Seren】暂时无法完全匹配你提到的风格，正在为你推荐类似风格的歌曲～',
+                  fromSeren: true,
+                };
+                setMessages((prev) => {
+                  const next = [...prev, fallbackReply];
+                  saveMessagesToStorage(next);
+                  return next;
+                });
+                if (!(timeoutOrErr instanceof Error && timeoutOrErr.message === 'unsupported_flow_timeout')) {
+                  console.warn('类似风格推荐失败或超时:', timeoutOrErr);
+                }
+              } finally {
+                setIsLoading(false);
+              }
+              return;
+            }
+
             if (hasMappedTags) {
               // 记录映射后的标签（用于调试）
               console.group('🎵 用户偏好映射结果');
               console.log('用户输入:', userInput);
-              console.log('映射后的标签:', mappedTags, 'isDislike:', extractedPrefs.isDislike);
+              console.log('映射后的标签:', mappedTags, 'isDislike:', effectivePrefs.isDislike);
 
               // 用户表达不喜欢：立即从偏好中移除该风格/特征，更新 DB（user_preferences + user_preference_updates），并重新请求推荐、立刻更新待播列表
-              if (extractedPrefs.isDislike) {
+              if (effectivePrefs.isDislike) {
                 const removals: { type: 'genres' | 'instruments' | 'moods' | 'themes'; items: string[] }[] = [];
                 if (mappedTags.genres.length > 0) removals.push({ type: 'genres', items: mappedTags.genres });
                 if (mappedTags.instruments.length > 0) removals.push({ type: 'instruments', items: mappedTags.instruments });
                 if (mappedTags.moods.length > 0) removals.push({ type: 'moods', items: mappedTags.moods });
                 if (mappedTags.themes.length > 0) removals.push({ type: 'themes', items: mappedTags.themes });
                 if (removals.length > 0) {
+                  const formatTagsForLog = (p: ReturnType<typeof getUserPreferences>) =>
+                    `风格=${(p?.genres ?? []).map(tagWithChinese).join(',') || '无'} 乐器=${(p?.instruments ?? []).map(tagWithChinese).join(',') || '无'} 情绪=${(p?.moods ?? []).map(tagWithChinese).join(',') || '无'} 主题=${(p?.themes ?? []).map(tagWithChinese).join(',') || '无'}`;
+                  const prefsBefore = getUserPreferences();
                   await removeUserPreferenceBatch(removals, { operation: 'dislike_remove', conversationContent: userInput });
+                  const prefsAfter = getUserPreferences();
+                  appendSystemLog(`[用户偏好] 用户主动表达偏好（厌恶）之后，用户偏好更新。用户消息原文：「${userInput}」。更新前标签：${formatTagsForLog(prefsBefore)}。更新后标签：${formatTagsForLog(prefsAfter)}`);
                   const parts: string[] = [];
-                  if (mappedTags.genres.length > 0) parts.push(mappedTags.genres.map(tagToChinese).join('、'));
-                  if (mappedTags.instruments.length > 0) parts.push(mappedTags.instruments.map(tagToChinese).join('、'));
-                  if (mappedTags.moods.length > 0) parts.push(mappedTags.moods.map(tagToChinese).join('、'));
-                  if (mappedTags.themes.length > 0) parts.push(mappedTags.themes.map(tagToChinese).join('、'));
+                  if (mappedTags.genres.length > 0) parts.push(mappedTags.genres.map(tagWithChinese).join('、'));
+                  if (mappedTags.instruments.length > 0) parts.push(mappedTags.instruments.map(tagWithChinese).join('、'));
+                  if (mappedTags.moods.length > 0) parts.push(mappedTags.moods.map(tagWithChinese).join('、'));
+                  if (mappedTags.themes.length > 0) parts.push(mappedTags.themes.map(tagWithChinese).join('、'));
                   const removedText = parts.join('，');
                   const dislikeReply: ChatMessage = {
                     role: 'assistant',
@@ -542,7 +815,10 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
               // 没有冲突，正常保存偏好（记录为对话操作并保存用户输入）
               const conversationOpt = { operation: 'conversation' as const, conversationContent: userInput };
               const formatTagsWithWeights = (tags: string[], weights?: Record<string, number>) =>
-                (tags || []).map((t) => (weights && weights[t] != null ? `${t}(${weights[t]})` : t)).join(', ');
+                (tags || []).map((t) => (weights && weights[t] != null ? `${tagWithChinese(t)}(${weights[t]})` : tagWithChinese(t))).join(', ');
+              const formatTagsForLog = (p: ReturnType<typeof getUserPreferences>) =>
+                `风格=${formatTagsWithWeights(p?.genres ?? [], p?.genresWeights)} 乐器=${formatTagsWithWeights(p?.instruments ?? [], p?.instrumentsWeights)} 情绪=${formatTagsWithWeights(p?.moods ?? [], p?.moodsWeights)} 主题=${formatTagsWithWeights(p?.themes ?? [], p?.themesWeights)}`;
+              const prefsBeforeLike = getUserPreferences();
               if (mappedTags.genres.length > 0) {
                 await addUserPreference('genres', mappedTags.genres, conversationOpt);
                 const p = getUserPreferences();
@@ -567,6 +843,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
               // 显示最终保存的偏好（含权重）
               const savedPrefs = getUserPreferences();
               console.log('📝 当前用户偏好:', savedPrefs);
+              appendSystemLog(`[用户偏好] 用户主动表达偏好（喜欢）之后，用户偏好更新。用户消息原文：「${userInput}」。更新前标签：${formatTagsForLog(prefsBeforeLike)}。更新后标签：${formatTagsForLog(savedPrefs)}`);
               appendSystemLog(`[用户偏好] 当前用户偏好: 风格=${formatTagsWithWeights(savedPrefs?.genres ?? [], savedPrefs?.genresWeights)} 乐器=${formatTagsWithWeights(savedPrefs?.instruments ?? [], savedPrefs?.instrumentsWeights)} 情绪=${formatTagsWithWeights(savedPrefs?.moods ?? [], savedPrefs?.moodsWeights)} 主题=${formatTagsWithWeights(savedPrefs?.themes ?? [], savedPrefs?.themesWeights)} 原因: ${getPreferenceOperationLabel('conversation')}`);
               console.groupEnd();
 
@@ -575,14 +852,21 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
               if (username) {
                 setLoading(true);
                 try {
-                  const latestPrefs = getUserPreferences();
+                  // 插播 3 首只按本次表达的标签拉取，不融合已有偏好
+                  const onlyExpressedPrefs = {
+                    genres: mappedTags.genres,
+                    instruments: mappedTags.instruments,
+                    moods: mappedTags.moods,
+                    themes: mappedTags.themes,
+                  };
                   appendSystemLog('[推荐] 已发送推荐请求（主动表达偏好），正在等待推荐接口返回...');
                   const { recommendedTracks: newRecommendations, recommendedScores: newScores, firstTrack: firstTrackFromApi, firstTracks: newFirstTracks } = await getRecommendations({
                     username,
                     systemType: currentSystem,
-                    explicitPreferences: latestPrefs,
+                    explicitPreferences: onlyExpressedPrefs,
                     count: 3,
                     trigger: 'user_expressed_preference',
+                    triggerUserMessage: userInput,
                   });
                   appendSystemLog(`[推荐] 请求完成，共 ${newRecommendations.length} 首`);
                   if (newRecommendations.length > 0) {
@@ -603,20 +887,28 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                 }
               }
 
-              // 构建偏好文本
-              const preferenceTexts: string[] = [];
+              // 构建回复：给出检测到的标签（中英文）、简单描述，并告知正在重新推荐
+              const tagParts: string[] = [];
               if (mappedTags.genres.length > 0) {
-                preferenceTexts.push(`风格：${mappedTags.genres.join('、')}`);
+                tagParts.push(`风格 ${mappedTags.genres.map(tagWithChinese).join('、')}`);
               }
               if (mappedTags.instruments.length > 0) {
-                preferenceTexts.push(`乐器：${mappedTags.instruments.join('、')}`);
+                tagParts.push(`乐器 ${mappedTags.instruments.map(tagWithChinese).join('、')}`);
               }
               if (mappedTags.moods.length > 0) {
-                preferenceTexts.push(`情绪：${mappedTags.moods.join('、')}`);
+                tagParts.push(`情绪 ${mappedTags.moods.map(tagWithChinese).join('、')}`);
               }
               if (mappedTags.themes.length > 0) {
-                preferenceTexts.push(`主题：${mappedTags.themes.join('、')}`);
+                tagParts.push(`主题 ${mappedTags.themes.map(tagWithChinese).join('、')}`);
               }
+              const tagDesc = tagParts.join('，');
+              const likeReplyContent = `【Seren】已记录你对 ${tagDesc} 的偏好，正在根据这些风格为你重新推荐～`;
+              const likeReply: ChatMessage = { role: 'assistant', content: likeReplyContent, fromSeren: true };
+              setMessages((prev) => {
+                const next = [...prev, likeReply];
+                saveMessagesToStorage(next);
+                return next;
+              });
 
               showPreferenceRememberedTip();
               // 偏好已处理，不继续调用LLM
@@ -851,6 +1143,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
         saveMessagesToStorage(next);
         return next;
       });
+      logWhyThisTrack(username, text, currentTrack.id, currentTrack.name).catch(() => {});
     } catch (e) {
       setMessages(prev => [...prev, { role: 'assistant', content: '生成推荐理由时出错了，请稍后再试。', fromSeren: true }]);
     } finally {
@@ -859,42 +1152,49 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
   };
 
   return (
-    <div className="w-full h-full min-h-0 flex flex-col bg-gray-100 border-r border-gray-200 relative" style={{ borderRightWidth: '0.5px' }}>
-      {/* Toggle Button - Floating on the right */}
-      {onToggleAssistant && (
-        <button
-          onClick={onToggleAssistant}
-          className="absolute top-3 right-4 z-50 flex items-center px-3 py-1 text-sm transition-all"
-          style={{ top: '12px' }}
-        >
-          <span style={{
-            background: 'linear-gradient(135deg, #D8CECF 0%, #91738B 100%)',
-            WebkitBackgroundClip: 'text',
-            WebkitTextFillColor: 'transparent',
-            backgroundClip: 'text',
-            textShadow: '0 0 8px rgba(216, 206, 207, 0.5), 0 0 4px rgba(145, 115, 139, 0.3)',
-          }}>
-            &lt;&lt;收起Seren
-          </span>
-        </button>
-      )}
-      
+    <div
+      className="w-full h-full min-h-0 flex flex-col bg-gray-100 border-r border-gray-200 relative"
+      style={{ borderRightWidth: '0.5px' }}
+      onMouseEnter={resetIdleCloseTimer}
+      onClick={resetIdleCloseTimer}
+    >
       {/* 系统眼中的你（偏好 treemap）弹窗 */}
       {showSystemEyesModal && <SystemEyesModal onClose={() => setShowSystemEyesModal(false)} />}
 
-      {/* Messages - min-h-0 让 flex 子项可收缩，才能出现滚动条并支持往上滑 */}
-      <div className="flex-1 min-h-0 overflow-y-auto pt-8 px-4 pb-4 space-y-4 bg-gray-50">
+      {/* 收起 Seren 按钮：固定在对话框上方左侧（红框位置），不与对话内容重叠 */}
+      {onToggleAssistant && (
+        <div className="flex-shrink-0 flex items-center px-4 pt-3 pb-1 bg-gray-50">
+          <button
+            onClick={(e) => { e.stopPropagation(); onToggleAssistant(); }}
+            className="flex items-center px-2 py-1 text-sm transition-all hover:opacity-80"
+            title="收起 Seren"
+          >
+            <span style={{
+              background: 'linear-gradient(135deg, #D8CECF 0%, #91738B 100%)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent',
+              backgroundClip: 'text',
+              textShadow: '0 0 8px rgba(216, 206, 207, 0.5), 0 0 4px rgba(145, 115, 139, 0.3)',
+            }}>
+              &lt;&lt;收起Seren
+            </span>
+          </button>
+        </div>
+      )}
+
+      {/* Messages - min-h-0 让 flex 子项可收缩，才能出现滚动条并支持往上滑；滚动/滚轮时重置 1 分钟无操作收起计时 */}
+      <div
+        className="flex-1 min-h-0 overflow-y-auto pt-2 px-4 pb-4 space-y-4 bg-gray-50"
+        onScroll={resetIdleCloseTimer}
+        onWheel={resetIdleCloseTimer}
+      >
         {messages.length === 0 ? (
           <div className="flex items-center justify-center h-full text-gray-400">
             <p>暂无消息</p>
           </div>
         ) : (
-          messages.map((message, index) => {
-            // 调试：打印所有消息
-            if (index === 0 || message.role === 'user') {
-              console.log(`Rendering message ${index}:`, message);
-            }
-
+          <>
+          {messages.map((message, index) => {
             // 跳过无效消息
             if (!message || !message.role) {
               console.warn('Invalid message at index', index, message);
@@ -957,7 +1257,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                       >
                         <p className="text-sm whitespace-pre-wrap leading-relaxed">
                           {message.fromSeren && <><span className="font-medium text-gray-600">【Seren】</span> </>}
-                          {message.content}
+                          <TextWithBoldTags text={message.content} as="span" />
                         </p>
                       </div>
                     </div>
@@ -969,6 +1269,15 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                           key={btnIndex}
                           className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 bg-white hover:bg-gray-50 text-gray-900 transition-colors"
                           onClick={async () => {
+                        const currentUser = getCurrentUser();
+                        const sessionId = getOrCreateConversationSessionId();
+                        if (currentUser && sessionId) {
+                          recordConversationButtonChoice(currentUser, sessionId, index, { label: button.label, action: button.action }).catch(() => {});
+                          const btnLogKey = `${sessionId}-${index}`;
+                          const logId = buttonLogIdByKeyRef.current[btnLogKey] ?? null;
+                          const nextText = getNextTextForButtonAction(button.action);
+                          logDialogButtonClick({ log_id: logId, clicked_label: button.label, clicked_action: button.action, next_text: nextText }).catch(() => {});
+                        }
                         // 点击后立即移除该条消息的按钮（先同步写 storage，再 setState，避免 500ms 轮询用旧数据覆盖）
                         const next = messages.map((msg, idx) => idx === index ? { ...msg, buttons: undefined } : msg);
                         saveMessagesToStorage(next);
@@ -979,6 +1288,11 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                         } else if (button.action === 'continue') {
                           showTransientButtonTip(index, '好的，我会继续为您推荐音乐。');
                         } else if (button.action === 'confirm_rating_feedback') {
+                          const currentRating = currentTrack ? getRating(currentTrack.id) : 0;
+                          if (currentRating === 3) {
+                            showTransientButtonTip(index, '好的，已记录。');
+                            return; // 3 星普通评分：后台不增加也不调整权重
+                          }
                           showPreferenceRememberedTip();
                           const messageContent = message.content;
                           // 根据评分更新用户偏好
@@ -991,7 +1305,15 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                               moods: currentTrack.tags.moods || [],
                               themes: currentTrack.tags.themes || [],
                             };
-                            
+                            if (!isLowRating) {
+                              const allTags = [
+                                ...(tagsToUpdate.genres || []),
+                                ...(tagsToUpdate.instruments || []),
+                                ...(tagsToUpdate.moods || []),
+                                ...(tagsToUpdate.themes || []),
+                              ];
+                              showWeightPlusOneTips(allTags);
+                            }
                             // 更新用户偏好
                             if (isLowRating) {
                               // 用户主动表达讨厌：立即从偏好中移除该歌的 tag，更新 DB（user_preferences + user_preference_updates），重新请求推荐并立刻更新待播列表
@@ -1004,6 +1326,8 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                                 await removeUserPreferenceBatch(removals, { operation: 'dislike_remove', conversationContent: '评分反馈：不喜欢' });
                                 console.log('已移除讨厌的 tag 并替换播放列表:', tagsToUpdate);
                               }
+                              const allTagsLow = [...(tagsToUpdate.genres || []), ...(tagsToUpdate.instruments || []), ...(tagsToUpdate.moods || []), ...(tagsToUpdate.themes || [])];
+                              if (allTagsLow.length > 0) setTimeout(() => pushWeightPlusOneMessages(allTagsLow.map((t) => `${tagWithChinese(t)}权重-1`)), 3000);
                             } else {
                               // 高分：提升这些标签的权重（通过增加添加次数）
                               const ratingOpt = { operation: 'rating_confirm' as const };
@@ -1036,7 +1360,13 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                               moods: currentTrack.tags.moods || [],
                               themes: currentTrack.tags.themes || [],
                             };
-                            
+                            const allTags1 = [
+                              ...(tagsToUpdate.genres || []),
+                              ...(tagsToUpdate.instruments || []),
+                              ...(tagsToUpdate.moods || []),
+                              ...(tagsToUpdate.themes || []),
+                            ];
+                            showWeightPlusOneTips(allTags1);
                             // 提升这些标签的权重（通过增加添加次数）
                             const oneMinOpt = { operation: 'one_minute_confirm' as const };
                             for (let i = 0; i < 2; i++) {
@@ -1066,6 +1396,13 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                               moods: currentTrack.tags.moods || [],
                               themes: currentTrack.tags.themes || [],
                             };
+                            const allTags95 = [
+                              ...(tagsToUpdate.genres || []),
+                              ...(tagsToUpdate.instruments || []),
+                              ...(tagsToUpdate.moods || []),
+                              ...(tagsToUpdate.themes || []),
+                            ];
+                            showWeightPlusOneTips(allTags95);
                             const ninetyFiveOpt = { operation: 'ninety_five_confirm' as const };
                             for (let i = 0; i < 2; i++) {
                               if (tagsToUpdate.genres.length > 0) await addUserPreference('genres', tagsToUpdate.genres, ninetyFiveOpt);
@@ -1097,6 +1434,10 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                           }
                         } else if (button.action === 'reject_ninety_five_percent_feedback') {
                           showTransientButtonTip(index, '好的，我不会据此修改您的偏好。');
+                        } else if (button.action === 'quick_skip_continue') {
+                          await usePlayerStore.getState().playNextFromList();
+                        } else if (button.action === 'quick_skip_explore') {
+                          await usePlayerStore.getState().prependDiversityTrackAndPlay();
                         } else if (button.action.startsWith('confirm_conflict_')) {
                           const actionParts = button.action.split('_');
                           if (actionParts.length >= 4) {
@@ -1122,7 +1463,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                     </div>
                   ) : transientButtonTip?.messageIndex === index ? (
                     <div className="text-[11px] text-gray-500 self-start py-1">
-                      {transientButtonTip.text}
+                      <TextWithBoldTags text={transientButtonTip.text} as="span" />
                     </div>
                   ) : null}
                 </div>
@@ -1135,14 +1476,15 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                         borderRadius: '1.5rem 1.5rem 0 1.5rem'
                       }}
                     >
-                      <p className="text-sm whitespace-pre-wrap leading-relaxed">{message.content}</p>
+                      <TextWithBoldTags text={message.content} as="p" className="text-sm whitespace-pre-wrap leading-relaxed" />
                     </div>
                   )}
                 </>
               )}
             </div>
           );
-          })
+          })}
+          </>
         )}
 
         {isLoading && (
@@ -1188,7 +1530,7 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
                 />
               </svg>
             </span>
-            <span className="font-medium text-[11px]">{preferenceRememberedTip}</span>
+            <span className="font-medium text-[11px]"><TextWithBoldTags text={preferenceRememberedTip} as="span" /></span>
           </div>
         )}
 
@@ -1225,11 +1567,15 @@ export default function AIAssistant({ onToggleAssistant, onFirstRecommendation }
           <input
             type="text"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              resetIdleCloseTimer(); // 输入时重置 1 分钟收起计时，避免输入未结束窗口被收起
+            }}
+            onFocus={resetIdleCloseTimer}
             onKeyPress={handleKeyPress}
-            placeholder="输入消息..."
+            placeholder="来问问任何跟音乐相关的问题吧～"
             disabled={isLoading}
-            className="flex-1 px-4 py-2 border border-gray-300 rounded-lg bg-transparent focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:bg-gray-100"
+            className="flex-1 px-4 py-2 text-sm border border-gray-300 rounded-lg bg-transparent focus:outline-none focus:ring-1 focus:ring-[#91738B] focus:border-[#91738B] disabled:bg-gray-100"
           />
           <button
             onClick={handleSend}

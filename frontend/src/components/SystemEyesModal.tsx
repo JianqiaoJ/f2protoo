@@ -1,16 +1,25 @@
 import { useEffect, useState, useRef } from 'react';
 import { getCurrentUser } from '../utils/storage';
-import { getPreferenceHeatmap, type PreferenceHeatmapData, type TagWeight } from '../api/preferenceHeatmap';
+import { getPreferenceHeatmap, logSystemEyesRequest, type PreferenceHeatmapData, type TagWeight } from '../api/preferenceHeatmap';
+
+/** 情绪与主题合并为「情绪/主题」：同 tag 只保留一条，权重相加 */
+function mergeMoodsThemes(moods: TagWeight[], themes: TagWeight[]): TagWeight[] {
+  const byTag = new Map<string, number>();
+  [...moods, ...themes].forEach(({ tag, weight }) => {
+    byTag.set(tag, (byTag.get(tag) ?? 0) + weight);
+  });
+  return Array.from(byTag.entries()).map(([tag, weight]) => ({ tag, weight })).filter((t) => t.weight > 0);
+}
 import { aiAssistantApi } from '../api/aiAssistant';
 import { tagToChinese } from '../utils/tagToChinese';
 import { usePlayerStore } from '../store';
+import { TextWithBoldTags } from './TextWithBoldTags';
 
-/** 类别基础色，用 rgba 提高透明度（整体更透明） */
+/** 类别基础色，用 rgba 提高透明度（整体更透明）；情绪与主题合并为「情绪/主题」一类 */
 const CATEGORY_COLORS: Record<string, string> = {
   genres: 'rgba(145, 115, 139, 0.72)',
   instruments: 'rgba(139, 119, 101, 0.72)',
-  moods: 'rgba(120, 130, 150, 0.72)',
-  themes: 'rgba(107, 123, 140, 0.72)',
+  moods_themes: 'rgba(120, 130, 150, 0.72)', // 情绪/主题 合并，不重复展示
 };
 
 /** Treemap 布局：权重越高面积越大。strip 按行填充，每行高度 ∝ 该行权重和 */
@@ -64,7 +73,7 @@ function StreamText({ text, charPerMs = 24 }: { text: string; charPerMs?: number
     }, charPerMs);
     return () => clearInterval(t);
   }, [text, charPerMs]);
-  return <>{text.slice(0, visibleLength)}</>;
+  return <TextWithBoldTags text={text.slice(0, visibleLength)} as="span" />;
 }
 
 export default function SystemEyesModal({ onClose }: SystemEyesModalProps) {
@@ -84,17 +93,31 @@ export default function SystemEyesModal({ onClose }: SystemEyesModalProps) {
         setExplanation('请先登录以查看系统眼中的你痴迷于…。');
         return;
       }
+      setError(null);
+      setExplanation('正在加载偏好数据…');
       try {
         const data = await getPreferenceHeatmap({ username: currentUser, system_type: currentSystem });
         setHeatmapData(data ?? null);
+        const moodsThemesUniqueCount = new Set([
+          ...(data?.moods ?? []).map((t) => t.tag),
+          ...(data?.themes ?? []).map((t) => t.tag),
+        ]).size;
         const hasData = data && (
-          (data.genres?.length ?? 0) + (data.instruments?.length ?? 0) +
-          (data.moods?.length ?? 0) + (data.themes?.length ?? 0)
+          (data.genres?.length ?? 0) + (data.instruments?.length ?? 0) + moodsThemesUniqueCount
         ) > 0;
         if (hasData && data) {
+          // 先让用户看到「正在生成」和树状图，不阻塞在 LLM 上
+          setExplanation('正在生成描述…');
           const text = await aiAssistantApi.generateHeatmapExplanation(data);
           setExplanation(text);
           explanationSetAt.current = Date.now();
+          // 记录到 DB：请求时间、返回文字、treemap tag 与权重
+          logSystemEyesRequest({
+            username: currentUser,
+            system_type: currentSystem,
+            explanation_text: text,
+            treemap_data: data,
+          }).catch(() => {});
         } else {
           setExplanation('暂无足够的听歌记录。至少完成一次「听完并评分」或「收藏」后才会产生听歌记录；多听多评，让 Seren 更了解你哦～');
         }
@@ -117,15 +140,28 @@ export default function SystemEyesModal({ onClose }: SystemEyesModalProps) {
     run();
   }, [currentSystem]);
 
-  // 文字流式播放结束后 1 秒再显示 treemap（与 StreamText 的 charPerMs 一致）
-  const STREAM_CHAR_MS = 24;
+  // 有偏好数据后尽快显示树状图（不等待 LLM 描述），避免「迟迟不能生成」的空白感；情绪/主题已合并计数
   useEffect(() => {
-    if (!explanation) return;
-    const streamDurationMs = explanation.length * STREAM_CHAR_MS;
-    const delayMs = streamDurationMs + 1000;
-    const timer = setTimeout(() => setShowTreemap(true), delayMs);
+    if (!heatmapData) return;
+    const merged = mergeMoodsThemes(heatmapData.moods ?? [], heatmapData.themes ?? []);
+    const totalTags = (heatmapData.genres?.length ?? 0) + (heatmapData.instruments?.length ?? 0) + merged.length;
+    if (totalTags === 0) return;
+    const timer = setTimeout(() => setShowTreemap(true), 400);
     return () => clearTimeout(timer);
-  }, [explanation]);
+  }, [heatmapData]);
+
+  // 生成 treemap 时输出详细 tags 与权重到控制台（情绪/主题已合并）
+  useEffect(() => {
+    if (!heatmapData) return;
+    const merged = mergeMoodsThemes(heatmapData.moods ?? [], heatmapData.themes ?? []);
+    const fmt = (list: TagWeight[]) =>
+      (list || []).map((item) => `${item.tag}: ${item.weight > 0 ? '+' : ''}${item.weight.toFixed(2)}`).join(', ') || '（无）';
+    console.log('[Treemap] 偏好 tags 与权重:', {
+      风格_genres: fmt(heatmapData.genres ?? []),
+      乐器_instruments: fmt(heatmapData.instruments ?? []),
+      '情绪/主题_moods_themes': fmt(merged),
+    });
+  }, [heatmapData]);
 
   const treemapItems: { tag: string; weight: number; category: string }[] = [];
   if (heatmapData) {
@@ -136,8 +172,7 @@ export default function SystemEyesModal({ onClose }: SystemEyesModalProps) {
     };
     push('genres', heatmapData.genres);
     push('instruments', heatmapData.instruments);
-    push('moods', heatmapData.moods);
-    push('themes', heatmapData.themes);
+    push('moods_themes', mergeMoodsThemes(heatmapData.moods ?? [], heatmapData.themes ?? []));
   }
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={onClose}>
@@ -214,7 +249,7 @@ export default function SystemEyesModal({ onClose }: SystemEyesModalProps) {
                     return (
                       <div
                         key={`${item.category}-${item.tag}-${i}`}
-                        className="absolute rounded-none flex items-center justify-center text-white text-xs font-medium truncate transition-transform hover:scale-[1.03] border border-white/90 box-border"
+                        className="absolute rounded-none flex items-center justify-center text-white text-xs font-bold truncate transition-transform hover:scale-[1.03] border border-white/90 box-border"
                         style={{
                           left: `${x}%`,
                           top: `${y}%`,

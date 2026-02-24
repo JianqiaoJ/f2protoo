@@ -147,6 +147,78 @@ body {
   animation: recommendation-glow 2s ease-in-out infinite;
 }
 
+/* 收藏气泡呼吸灯（与气泡同色浅黄） */
+@keyframes favorite-tip-glow {
+  0%, 100% {
+    box-shadow:
+      0 0 5px rgba(196, 181, 154, 0.7),
+      0 0 8px rgba(196, 181, 154, 0.6),
+      0 0 10px rgba(196, 181, 154, 0.5),
+      0 0 12px rgba(196, 181, 154, 0.4);
+    opacity: 1;
+  }
+  50% {
+    box-shadow:
+      0 0 8px rgba(196, 181, 154, 0.9),
+      0 0 12px rgba(196, 181, 154, 0.7),
+      0 0 15px rgba(196, 181, 154, 0.6),
+      0 0 18px rgba(196, 181, 154, 0.5);
+    opacity: 0.9;
+  }
+}
+
+.favorite-tip {
+  animation: favorite-tip-glow 2s ease-in-out infinite;
+}
+
+/* 多样性推荐解释气泡呼吸灯（情绪/主题蓝 #788296 #6B7B8C） */
+@keyframes diversity-recommend-glow {
+  0%, 100% {
+    box-shadow:
+      0 0 5px rgba(120, 130, 150, 0.7),
+      0 0 8px rgba(120, 130, 150, 0.6),
+      0 0 10px rgba(107, 123, 140, 0.5),
+      0 0 12px rgba(107, 123, 140, 0.4);
+    opacity: 1;
+  }
+  50% {
+    box-shadow:
+      0 0 8px rgba(120, 130, 150, 0.9),
+      0 0 12px rgba(120, 130, 150, 0.7),
+      0 0 15px rgba(107, 123, 140, 0.6),
+      0 0 18px rgba(107, 123, 140, 0.5);
+    opacity: 0.9;
+  }
+}
+
+.diversity-recommend-tip {
+  animation: diversity-recommend-glow 2s ease-in-out infinite;
+}
+
+/* 快速切换/多样性选择气泡：中深灰背景 + 灰色呼吸光晕（与推荐解释气泡图二一致） */
+@keyframes gray-bubble-glow {
+  0%, 100% {
+    box-shadow:
+      0 0 5px rgba(107, 114, 128, 0.5),
+      0 0 8px rgba(107, 114, 128, 0.4),
+      0 0 10px rgba(75, 85, 99, 0.4),
+      0 0 12px rgba(75, 85, 99, 0.3);
+    opacity: 1;
+  }
+  50% {
+    box-shadow:
+      0 0 8px rgba(107, 114, 128, 0.6),
+      0 0 12px rgba(107, 114, 128, 0.5),
+      0 0 15px rgba(75, 85, 99, 0.5),
+      0 0 18px rgba(75, 85, 99, 0.4);
+    opacity: 0.9;
+  }
+}
+
+.gray-bubble-tip {
+  animation: gray-bubble-glow 2s ease-in-out infinite;
+}
+
 /* 累计播放满 20 分钟时计时器闪烁提醒 */
 @keyframes session-timer-flash {
   0%, 100% {

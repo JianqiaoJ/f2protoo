@@ -3,14 +3,19 @@ import { JamendoTrack, FavoriteTrack, PlayerState, TrackRating, UserPreference, 
 import { jamendoApi } from './api';
 import { getUserStorageKey, getCurrentUser } from './utils/storage';
 import { getRecommendations } from './api/recommend';
+import { getDiversityRecommendation } from './api/diversity';
 import { getPlaylist, setPlaylist } from './api/playlist';
 import { saveUserPreferences, getUserPreferences as fetchUserPreferences, getPreferenceOperationLabel, type PreferenceUpdateOperation } from './api/preferences';
 import { appendSystemLog } from './api/logs';
 
 let preloadInProgress = false;
+/** 用户主动表达喜好插播 3 首后，在此时间戳之前不触发「待播列表剩余不多，预拉下一批」 */
+let skipPreloadUntilTimestamp = 0;
 
 interface PlayerStore extends PlayerState {
-  setCurrentTrack: (track: JamendoTrack | null) => void;
+  setCurrentTrack: (track: JamendoTrack | null, reasonOverride?: string) => void;
+  /** 当前曲目被加入推荐列表时的原因（如「探索新领域」「多样性推荐」），用于气泡样式与「为什么推荐这首」 */
+  currentTrackRecommendReason: string | null;
   setCurrentTrackIndex: (index: number) => void;
   setIsPlaying: (playing: boolean) => void;
   addFavorite: (track: JamendoTrack) => void; // 收藏不需要rating
@@ -36,6 +41,8 @@ interface PlayerStore extends PlayerState {
   loadRandomTrack: () => Promise<void>; // 从待播列表按序取下一首，列表耗尽时请求推荐并同步待播列表，不随机选歌
   /** 仅从当前待播列表播下一首（不拉新推荐），用于「推荐下一首」请求进行中时仍可连续切歌 */
   playNextFromList: () => Promise<boolean>;
+  /** 获取一首多样性推荐并插入待播列表最前且立即播放（规则同多样性推荐） */
+  prependDiversityTrackAndPlay: () => Promise<void>;
   togglePlayPause: () => void;
   setCurrentTime: (time: number) => void; // 设置当前播放时间
   currentTime: number; // 当前播放时间
@@ -67,6 +74,21 @@ interface PlayerStore extends PlayerState {
   /** 当前系统模式：A=无 Seren 小助手，B=融合 Seren 小助手；用于 A/B 实验与 DB 维度 */
   currentSystem: 'A' | 'B';
   setCurrentSystem: (system: 'A' | 'B') => void;
+  /** 权重+1 提示队列（在进度条气泡上方按序展示，每条 1s 后向上渐隐消失） */
+  weightPlusOneQueue: string[];
+  pushWeightPlusOneMessages: (messages: string[]) => void;
+  shiftWeightPlusOneQueue: () => void;
+  /** 用户喜爱的艺术家名列表（5 星或收藏时写入） */
+  favoriteArtists: string[];
+  /** 用户喜爱的专辑名列表（5 星或收藏时写入） */
+  favoriteAlbums: string[];
+  /** 将当前曲目的艺术家和专辑加入喜爱列表（去重），供每 5/6 首插队用 */
+  addFavoriteArtistAndAlbum: (track: JamendoTrack) => void;
+  /** 已播放的推荐曲目计数（每 5 首插艺术家曲、每 6 首插专辑曲） */
+  recommendedSongsPlayedCount: number;
+  incrementRecommendedSongsPlayedCount: () => void;
+  /** 在待播列表最前插入一首曲目及推荐理由（用于喜爱艺术家/专辑插队） */
+  prependRecommendedTrack: (track: JamendoTrack, reason: string) => void;
 }
 
 // Simple localStorage persistence (按用户隔离)
@@ -80,7 +102,16 @@ const loadFromStorage = () => {
   }
 };
 
-const saveToStorage = (favorites: FavoriteTrack[], ratings: TrackRating[], userPreferences: UserPreference, currentTrackIndex: number, history: HistoryRecord[]) => {
+const saveToStorage = (
+  favorites: FavoriteTrack[],
+  ratings: TrackRating[],
+  userPreferences: UserPreference,
+  currentTrackIndex: number,
+  history: HistoryRecord[],
+  consecutivePlayCount: number = 0,
+  favoriteArtists: string[] = [],
+  favoriteAlbums: string[] = [],
+) => {
   try {
     const storageKey = getUserStorageKey('jamendo-player-storage');
     localStorage.setItem(storageKey, JSON.stringify({
@@ -89,6 +120,9 @@ const saveToStorage = (favorites: FavoriteTrack[], ratings: TrackRating[], userP
       userPreferences,
       currentTrackIndex,
       history,
+      consecutivePlayCount,
+      favoriteArtists,
+      favoriteAlbums,
     }));
   } catch (e) {
     console.error('Failed to save to storage:', e);
@@ -100,6 +134,7 @@ const initialState = loadFromStorage();
 export const usePlayerStore = create<PlayerStore>()(
     (set, get) => ({
       currentTrack: null,
+      currentTrackRecommendReason: null,
       currentTrackIndex: initialState.currentTrackIndex || 0,
       isPlaying: false,
       favorites: initialState.favorites || [],
@@ -121,9 +156,13 @@ export const usePlayerStore = create<PlayerStore>()(
       recommendedTrackRequestedAt: {},
       recommendedTrackIndex: 0,
       recommendedTrackDetails: {}, // 前 N 首曲目详情缓存，用于下一首直接播放
+      favoriteArtists: Array.isArray(initialState.favoriteArtists) ? initialState.favoriteArtists : [],
+      favoriteAlbums: Array.isArray(initialState.favoriteAlbums) ? initialState.favoriteAlbums : [],
+      recommendedSongsPlayedCount: 0, // 不持久化，仅用于每 5/6 首插队
       preloadedNextBatch: null,
       setPreloadedNextBatch: (batch) => set({ preloadedNextBatch: batch }),
       preloadNextRecommendationsIfNeeded: () => {
+        if (Date.now() < skipPreloadUntilTimestamp) return;
         const state = get();
         const username = getCurrentUser();
         if (!username || state.preloadedNextBatch !== null || preloadInProgress) return;
@@ -174,7 +213,6 @@ export const usePlayerStore = create<PlayerStore>()(
           setPlaylist(username, mergedIds, get().currentSystem).catch(() => {});
           appendSystemLog(`[推荐] 已在列表下方补充 ${appendIds.length} 首，当前共 ${mergedIds.length} 首`);
           // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'store.ts:preload_append_done',message:'preload_append_done',data:{mergedLen:mergedIds.length,appendLen:appendIds.length,firstAppendId:appendIds[0]},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
           // #endregion
         }).catch(() => {
           preloadInProgress = false;
@@ -183,7 +221,7 @@ export const usePlayerStore = create<PlayerStore>()(
       preferencesVersion: 0,
       lastPreferenceOperation: undefined as PreferenceUpdateOperation | undefined,
       lastRecommendationPreferencesVersion: 0, // 上次推荐时的偏好版本号
-      consecutivePlayCount: 0, // 连续听歌数量
+      consecutivePlayCount: typeof initialState.consecutivePlayCount === 'number' ? initialState.consecutivePlayCount : 0, // 连续听歌数量（持久化，用于多样性推荐触发）
       currentSystem: (() => {
         try {
           const v = localStorage.getItem('currentSystem');
@@ -192,6 +230,14 @@ export const usePlayerStore = create<PlayerStore>()(
           return 'A';
         }
       })(),
+      weightPlusOneQueue: [] as string[],
+      pushWeightPlusOneMessages: (messages) => {
+        if (!messages.length) return;
+        set((s) => ({ weightPlusOneQueue: [...s.weightPlusOneQueue, ...messages] }));
+      },
+      shiftWeightPlusOneQueue: () => {
+        set((s) => ({ weightPlusOneQueue: s.weightPlusOneQueue.slice(1) }));
+      },
       setCurrentSystem: (system) => {
         set({ currentSystem: system });
         try {
@@ -217,16 +263,22 @@ export const usePlayerStore = create<PlayerStore>()(
         }
       },
 
-      setCurrentTrack: (track) => {
-        set({ currentTrack: track });
-        if (!track) return;
+      setCurrentTrack: (track, reasonOverride) => {
+        if (!track) {
+          set({ currentTrack: null, currentTrackRecommendReason: null });
+          return;
+        }
         const ids = get().recommendedTrackIds;
         const trackIdStr = String(track.id);
         const norm = (id: string | number) => String(id).replace(/^track_0*/, '');
         const trackNorm = norm(trackIdStr);
         const matchId = (id: string) => norm(id) === trackNorm;
         const removedIndex = ids.findIndex(matchId);
+        const currentReasons = get().recommendedTrackReasons;
+        const reason = reasonOverride !== undefined ? reasonOverride : (removedIndex >= 0 ? (currentReasons[removedIndex] ?? null) : null);
+        set({ currentTrack: track, currentTrackRecommendReason: reason });
         if (removedIndex < 0) return;
+        get().incrementRecommendedSongsPlayedCount();
         const newIds = ids.filter((id) => !matchId(id));
         const prevScores = get().recommendedTrackScores;
         const newScores = { ...prevScores };
@@ -236,12 +288,10 @@ export const usePlayerStore = create<PlayerStore>()(
         const recIndex = get().recommendedTrackIndex;
         const newIndex = removedIndex <= recIndex ? recIndex : recIndex - 1;
         const clampedIndex = newIds.length === 0 ? 0 : Math.max(0, Math.min(newIds.length - 1, newIndex));
-        const currentReasons = get().recommendedTrackReasons;
         const newReasons = currentReasons.length === ids.length ? currentReasons.filter((_, i) => i !== removedIndex) : newIds.map(() => '');
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'store.ts:setCurrentTrack',message:'setCurrentTrack',data:{idsLen:ids.length,removedIndex,recIndex,newIndex,clampedIndex,newIdsLen:newIds.length},timestamp:Date.now(),hypothesisId:'H3'})}).catch(()=>{});
         // #endregion
-        set({ recommendedTrackIds: newIds, recommendedTrackReasons: newReasons, recommendedTrackScores: newScores, recommendedTrackIndex: clampedIndex });
+        set({ recommendedTrackIds: newIds, recommendedTrackReasons: newReasons, recommendedTrackScores: newScores, recommendedTrackIndex: clampedIndex, currentTrackRecommendReason: reason });
         const username = getCurrentUser();
         if (username) setPlaylist(username, newIds, get().currentSystem).catch(() => {});
         // 待播列表剩余 ≤1 首时，后台预拉新推荐并追加到列表末尾，避免用户播完最后一首再等
@@ -249,7 +299,6 @@ export const usePlayerStore = create<PlayerStore>()(
           (async () => {
             try {
               // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'store.ts:preload_start',message:'preload_start',data:{newIdsLen:newIds.length},timestamp:Date.now(),hypothesisId:'H3'})}).catch(()=>{});
               // #endregion
               appendSystemLog('[推荐] 待播列表即将播完，后台预拉新推荐...');
               const latestPreferences = get().getUserPreferences();
@@ -288,7 +337,6 @@ export const usePlayerStore = create<PlayerStore>()(
               set({ recommendedTrackIds: mergedIds, recommendedTrackReasons: mergedReasons, recommendedTrackScores: mergedScores, recommendedTrackDetails: mergedDetails, recommendedTrackRequestedAt: mergedRequestedAt, recommendedTrackIndex: nextIndex });
               setPlaylist(getCurrentUser() ?? '', mergedIds, get().currentSystem).catch(() => {});
               // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'store.ts:preload_done',message:'preload_done',data:{currentIdsLen:currentIds.length,mergedIdsLen:mergedIds.length,nextIndex},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
               // #endregion
               appendSystemLog(`[推荐] 后台预拉完成，待播列表追加 ${appendIds.length} 首，共 ${mergedIds.length} 首`);
             } catch (e) {
@@ -323,7 +371,8 @@ export const usePlayerStore = create<PlayerStore>()(
           newFavorites = [...favorites, favorite];
         }
         set({ favorites: newFavorites });
-        saveToStorage(newFavorites, get().ratings, get().userPreferences, get().currentTrackIndex, get().history);
+        get().addFavoriteArtistAndAlbum(track);
+        saveToStorage(newFavorites, get().ratings, get().userPreferences, get().currentTrackIndex, get().history, get().consecutivePlayCount, get().favoriteArtists, get().favoriteAlbums);
         
         // 当用户收藏歌曲时，将该歌曲的tags添加到用户偏好中（隐式偏好）
         if (track.tags) {
@@ -360,7 +409,7 @@ export const usePlayerStore = create<PlayerStore>()(
       removeFavorite: (trackId) => {
         const newFavorites = get().favorites.filter(f => f.id !== trackId);
         set({ favorites: newFavorites });
-        saveToStorage(newFavorites, get().ratings, get().userPreferences, get().currentTrackIndex, get().history);
+        saveToStorage(newFavorites, get().ratings, get().userPreferences, get().currentTrackIndex, get().history, get().consecutivePlayCount, get().favoriteArtists, get().favoriteAlbums);
       },
 
       // 独立的评分功能，不影响收藏状态
@@ -387,9 +436,9 @@ export const usePlayerStore = create<PlayerStore>()(
             rating,
           };
           set({ favorites: updatedFavorites });
-          saveToStorage(updatedFavorites, newRatings, get().userPreferences, get().currentTrackIndex, get().history);
+          saveToStorage(updatedFavorites, newRatings, get().userPreferences, get().currentTrackIndex, get().history, get().consecutivePlayCount, get().favoriteArtists, get().favoriteAlbums);
         } else {
-          saveToStorage(favorites, newRatings, get().userPreferences, get().currentTrackIndex, get().history);
+          saveToStorage(favorites, newRatings, get().userPreferences, get().currentTrackIndex, get().history, get().consecutivePlayCount, get().favoriteArtists, get().favoriteAlbums);
         }
       },
 
@@ -398,32 +447,81 @@ export const usePlayerStore = create<PlayerStore>()(
         return rating ? rating.rating : 0;
       },
 
+      addFavoriteArtistAndAlbum: (track) => {
+        const artist = track?.artist_name?.trim();
+        const album = track?.album_name?.trim();
+        if (!artist && !album) return;
+        const state = get();
+        let nextArtists = state.favoriteArtists;
+        let nextAlbums = state.favoriteAlbums;
+        if (artist && !nextArtists.includes(artist)) {
+          nextArtists = [...nextArtists, artist];
+        }
+        if (album && !nextAlbums.includes(album)) {
+          nextAlbums = [...nextAlbums, album];
+        }
+        if (nextArtists !== state.favoriteArtists || nextAlbums !== state.favoriteAlbums) {
+          set({ favoriteArtists: nextArtists, favoriteAlbums: nextAlbums });
+          saveToStorage(state.favorites, state.ratings, state.userPreferences, state.currentTrackIndex, state.history, state.consecutivePlayCount, nextArtists, nextAlbums);
+        }
+      },
+
+      incrementRecommendedSongsPlayedCount: () => {
+        set({ recommendedSongsPlayedCount: get().recommendedSongsPlayedCount + 1 });
+      },
+
+      prependRecommendedTrack: (track, reason) => {
+        const state = get();
+        const newIds = [String(track.id), ...state.recommendedTrackIds];
+        const newReasons = [reason, ...state.recommendedTrackReasons];
+        const newScores = { ...state.recommendedTrackScores, [track.id]: 0 };
+        const newDetails = { ...state.recommendedTrackDetails, [track.id]: track };
+        const now = Date.now();
+        const newRequestedAt = { ...state.recommendedTrackRequestedAt, [track.id]: now };
+        set({
+          recommendedTrackIds: newIds,
+          recommendedTrackReasons: newReasons,
+          recommendedTrackScores: newScores,
+          recommendedTrackDetails: newDetails,
+          recommendedTrackRequestedAt: newRequestedAt,
+          recommendedTrackIndex: 0,
+        });
+        const username = getCurrentUser();
+        if (username) setPlaylist(username, newIds, get().currentSystem).catch(() => {});
+      },
+
       addUserPreference: async (type, items, options) => {
         const preferences = get().userPreferences;
+        const op = options?.operation;
+        // 收藏、评分高「是这样的」、听满1分钟「是这样的」：对涉及 tag 做权重 +1；其它操作仅确保新 tag 权重为 1
+        const isWeightIncrementOp = op === 'favorite' || op === 'rating_confirm' || op === 'one_minute_confirm';
         // 确保 currentItems 是数组
         const currentItems = Array.isArray(preferences[type]) ? preferences[type] : [];
         // 添加新项目，避免重复
         const newItems = [...new Set([...currentItems, ...items])];
         
-        // 检查是否有实际更新（避免重复添加导致不必要的清空推荐列表）
-        const hasChange = newItems.length !== currentItems.length || 
-          items.some(item => !currentItems.includes(item));
+        // 检查是否有实际更新：列表变化，或「权重递增」操作且有待处理 tag（即使已在列表中也要 +1）
+        const listChange = newItems.length !== currentItems.length || items.some(item => !currentItems.includes(item));
+        const hasChange = listChange || (isWeightIncrementOp && items.length > 0);
 
         if (hasChange) {
           const weightKey = (type === 'genres' ? 'genresWeights' : type === 'instruments' ? 'instrumentsWeights' : type === 'moods' ? 'moodsWeights' : 'themesWeights') as keyof UserPreference;
           const currentWeights = (preferences[weightKey] as Record<string, number> | undefined) || {};
           const newWeights = { ...currentWeights };
-          items.forEach((item) => { newWeights[item] = newWeights[item] ?? 1; });
+          if (isWeightIncrementOp) {
+            items.forEach((item) => { newWeights[item] = (newWeights[item] ?? 0) + 1; });
+          } else {
+            items.forEach((item) => { newWeights[item] = newWeights[item] ?? 1; });
+          }
           const updatedPreferences = {
             ...preferences,
             [type]: newItems,
             [weightKey]: newWeights,
           };
-          const op = options?.operation;
           const isConfirmOp = op === 'rating_confirm' || op === 'one_minute_confirm' || op === 'ninety_five_confirm' || op === 'conflict_confirm';
           const keepPlaylist = isConfirmOp || op === 'favorite' || op === 'first_login' || op === 'conversation';
           set({ userPreferences: updatedPreferences });
-          saveToStorage(get().favorites, get().ratings, updatedPreferences, get().currentTrackIndex, get().history);
+          saveToStorage(get().favorites, get().ratings, updatedPreferences, get().currentTrackIndex, get().history, get().consecutivePlayCount, get().favoriteArtists, get().favoriteAlbums);
 
           const newVersion = get().preferencesVersion + 1;
           if (isConfirmOp) {
@@ -481,6 +579,7 @@ export const usePlayerStore = create<PlayerStore>()(
                   explicitPreferences: onlyNewTagPrefs,
                   count: 5,
                   trigger: 'user_expressed_preference',
+                  triggerUserMessage: options?.conversationContent,
                 })
                   .then(async (result) => {
                     appendSystemLog(`[推荐] 请求完成，共 ${result.recommendedTracks?.length ?? 0} 首`);
@@ -610,7 +709,7 @@ export const usePlayerStore = create<PlayerStore>()(
         const existingPlaylist = get().recommendedTrackIds;
         if (hasChange) {
           set({ userPreferences: updatedPreferences });
-          saveToStorage(get().favorites, get().ratings, updatedPreferences, get().currentTrackIndex, get().history);
+          saveToStorage(get().favorites, get().ratings, updatedPreferences, get().currentTrackIndex, get().history, get().consecutivePlayCount, get().favoriteArtists, get().favoriteAlbums);
           set({ preferencesVersion: newVersion });
           try {
             // 每次偏好更新都写 DB 两表：saveUserPreferences 会令后端同时更新 user_preferences 与 user_preference_updates
@@ -676,10 +775,12 @@ export const usePlayerStore = create<PlayerStore>()(
 
       incrementConsecutivePlayCount: () => {
         set((state) => ({ consecutivePlayCount: state.consecutivePlayCount + 1 }));
+        saveToStorage(get().favorites, get().ratings, get().userPreferences, get().currentTrackIndex, get().history, get().consecutivePlayCount, get().favoriteArtists, get().favoriteAlbums);
       },
 
       resetConsecutivePlayCount: () => {
         set({ consecutivePlayCount: 0 });
+        saveToStorage(get().favorites, get().ratings, get().userPreferences, get().currentTrackIndex, get().history, 0, get().favoriteArtists, get().favoriteAlbums);
       },
 
       getUserPreferences: () => {
@@ -688,7 +789,7 @@ export const usePlayerStore = create<PlayerStore>()(
 
       replaceUserPreferences: (prefs) => {
         set((s) => ({ userPreferences: prefs, preferencesVersion: s.preferencesVersion + 1 }));
-        saveToStorage(get().favorites, get().ratings, prefs, get().currentTrackIndex, get().history);
+        saveToStorage(get().favorites, get().ratings, prefs, get().currentTrackIndex, get().history, get().consecutivePlayCount, get().favoriteArtists, get().favoriteAlbums);
       },
 
       addHistoryRecord: (track, duration) => {
@@ -706,7 +807,7 @@ export const usePlayerStore = create<PlayerStore>()(
         // 添加到数组开头（最新的在上面）
         const updatedHistory = [newRecord, ...history];
         set({ history: updatedHistory });
-        saveToStorage(get().favorites, get().ratings, get().userPreferences, get().currentTrackIndex, updatedHistory);
+        saveToStorage(get().favorites, get().ratings, get().userPreferences, get().currentTrackIndex, updatedHistory, get().consecutivePlayCount, get().favoriteArtists, get().favoriteAlbums);
       },
 
       getHistory: () => {
@@ -714,7 +815,7 @@ export const usePlayerStore = create<PlayerStore>()(
       },
 
       loadRandomTrack: async () => {
-        const { setLoading, setError, setCurrentTrack, setIsPlaying, currentTrack, recommendedTrackIds, recommendedTrackIndex, setRecommendedTrackIds, setRecommendedTrackIndex } = get();
+        const { setLoading, setError, setCurrentTrack, setIsPlaying, currentTrack, recommendedTrackIds, setRecommendedTrackIds, setRecommendedTrackIndex } = get();
         const username = getCurrentUser();
         // 要播的歌必须来自待播列表：有待播则按序播，无则需登录后请求推荐，不依赖后端 trackIds
         if (!username && recommendedTrackIds.length === 0) return;
@@ -724,14 +825,36 @@ export const usePlayerStore = create<PlayerStore>()(
         const listEmpty = recommendedTrackIds.length === 0;
         appendSystemLog(listEmpty ? '[推荐] 已点击推荐下一首，待播列表为空，正在请求推荐…' : '[推荐] 已点击推荐下一首，正在处理…');
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'store.ts:loadRandomTrack_start',message:'loadRandomTrack_start',data:{recommendedTrackIdsLen:recommendedTrackIds.length,recommendedTrackIndex},timestamp:Date.now(),hypothesisId:'H2'})}).catch(()=>{});
         // #endregion
 
         try {
+          /** 每推荐 5 首插队一首喜爱艺术家、每推荐 6 首插队一首喜爱专辑内的歌 */
+          if (username) {
+            const count = get().recommendedSongsPlayedCount;
+            const favArtists = get().favoriteArtists;
+            const favAlbums = get().favoriteAlbums;
+            if (count > 0 && count % 6 === 0 && favAlbums.length > 0) {
+              const album = favAlbums[Math.floor(Math.random() * favAlbums.length)];
+              const albumTrack = await jamendoApi.getOneTrackByAlbumName(album);
+              if (albumTrack) {
+                get().prependRecommendedTrack(albumTrack, `你刚刚听了《${album}》专辑，你可能也会喜欢专辑内的这首`);
+                appendSystemLog(`[推荐] 喜爱专辑插队：${album}`);
+              }
+            }
+            if (count > 0 && count % 5 === 0 && favArtists.length > 0) {
+              const artist = favArtists[Math.floor(Math.random() * favArtists.length)];
+              const artistTrack = await jamendoApi.getOneTrackByArtistName(artist);
+              if (artistTrack) {
+                get().prependRecommendedTrack(artistTrack, `你刚听了${artist}的歌，你可能也会喜欢他的这首歌`);
+                appendSystemLog(`[推荐] 喜爱艺术家插队：${artist}`);
+              }
+            }
+          }
+
           /** 本次若请求了推荐且后端返回了首曲详情，则直接用于播放，避免再请求 Jamendo */
           let lastFirstTrackFromApi = null as Awaited<ReturnType<typeof getRecommendations>>['firstTrack'];
-          let currentRecommendedIds = recommendedTrackIds;
-          let currentIndex = recommendedTrackIndex;
+          let currentRecommendedIds = get().recommendedTrackIds;
+          let currentIndex = get().recommendedTrackIndex;
 
           // 下一首永远按待播列表顺序往下播：从 currentIndex 起按序尝试播放；若下一首在历史记录里则跳过
           const detailsCache = get().recommendedTrackDetails;
@@ -759,7 +882,7 @@ export const usePlayerStore = create<PlayerStore>()(
               setRecommendedTrackIndex(idx + 1);
               setCurrentTrack(track);
               set({ currentTrackIndex: idx });
-              saveToStorage(get().favorites, get().ratings, get().userPreferences, idx, get().history);
+              saveToStorage(get().favorites, get().ratings, get().userPreferences, idx, get().history, get().consecutivePlayCount, get().favoriteArtists, get().favoriteAlbums);
               setIsPlaying(true);
               setLoading(false);
               if (currentRecommendedIds.length - (idx + 1) <= 2) {
@@ -777,12 +900,10 @@ export const usePlayerStore = create<PlayerStore>()(
           if (username && !isExhausted) {
             const oldLength = currentRecommendedIds.length;
             // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'store.ts:getPlaylist_call',message:'getPlaylist_call',data:{currentIndex,currentRecommendedIdsLen:currentRecommendedIds.length},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
             // #endregion
             appendSystemLog('[待播列表] 已发送请求，正在等待后端返回待播列表...');
             const playlistRes = await getPlaylist(username, currentIndex, get().currentSystem);
             // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'store.ts:getPlaylist_done',message:'getPlaylist_done',data:{playlistTrackIdsLen:playlistRes.trackIds?.length??0,success:playlistRes.success},timestamp:Date.now(),hypothesisId:'H1'})}).catch(()=>{});
             // #endregion
             appendSystemLog(playlistRes.success && playlistRes.trackIds.length > 0
               ? `[待播列表] 请求完成，共 ${playlistRes.trackIds.length} 首`
@@ -823,6 +944,7 @@ export const usePlayerStore = create<PlayerStore>()(
             appendSystemLog(`[用户偏好] 检测到用户偏好已更新，重新获取推荐列表... 原因: 偏好版本变化触发重新拉取`);
             try {
               const latestPreferences = get().getUserPreferences();
+              console.log('[推荐-步骤] 正在请求推荐接口（偏好更新）...');
               appendSystemLog('[推荐] 已发送推荐请求（偏好更新），正在等待推荐接口返回...');
               const result = await getRecommendations({
                 username,
@@ -833,6 +955,7 @@ export const usePlayerStore = create<PlayerStore>()(
                 trigger: 'preferences_updated',
                 preferenceUpdateReason: get().lastPreferenceOperation,
               });
+              console.log('[推荐-步骤] 推荐接口已返回，共', result.recommendedTracks.length, '首，firstTrack=', !!result.firstTrack, 'firstTracks 条数=', result.firstTracks?.length ?? 0);
               appendSystemLog(`[推荐] 请求完成，共 ${result.recommendedTracks.length} 首`);
               currentRecommendedIds = result.recommendedTracks;
               lastFirstTrackFromApi = result.firstTrack ?? null;
@@ -863,6 +986,7 @@ export const usePlayerStore = create<PlayerStore>()(
             } else {
               try {
                 const listEmpty = currentRecommendedIds.length === 0;
+                console.log('[推荐-步骤] 正在请求推荐接口（列表空/播完）...');
                 appendSystemLog(listEmpty ? '[推荐] 待播列表为空，正在请求推荐...' : '[推荐] 已播到列表最后一首，正在请求新推荐...');
                 const latestPreferences = get().getUserPreferences();
                 const result = await getRecommendations({
@@ -873,6 +997,7 @@ export const usePlayerStore = create<PlayerStore>()(
                   count: 10,
                   trigger: 'playlist_finished',
                 });
+                console.log('[推荐-步骤] 推荐接口已返回，共', result.recommendedTracks?.length ?? 0, '首，firstTrack=', !!result.firstTrack);
                 if (result.recommendedTracks && result.recommendedTracks.length > 0) {
                   const existingIds = get().recommendedTrackIds;
                   if (existingIds.length > result.recommendedTracks.length) {
@@ -906,10 +1031,12 @@ export const usePlayerStore = create<PlayerStore>()(
           let track = null;
           let selectedTrackId = '';
           const trackDetailsCache = get().recommendedTrackDetails;
+          console.log('[推荐-步骤] 开始取首曲，lastFirstTrackFromApi=', !!lastFirstTrackFromApi, '缓存条数=', Object.keys(trackDetailsCache).length);
           if (lastFirstTrackFromApi && currentIndex === 0 && currentRecommendedIds.length > 0 && normId(currentRecommendedIds[0]) === normId(lastFirstTrackFromApi.id)) {
             track = lastFirstTrackFromApi;
             selectedTrackId = lastFirstTrackFromApi.id;
             setRecommendedTrackIndex(1);
+            console.log('[推荐-步骤] 使用后端返回的首曲 firstTrack，id=', selectedTrackId);
           }
           let attempts = track ? 1 : 0;
           const maxAttempts = Math.min(currentRecommendedIds.length - currentIndex, 10);
@@ -928,11 +1055,11 @@ export const usePlayerStore = create<PlayerStore>()(
             if (cached) {
               track = cached;
               setRecommendedTrackIndex(nextIndex + 1);
-              const ts = new Date().toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-              console.log(`✅ [${ts}] 使用缓存曲目 - track_id: ${selectedTrackId}，索引: ${nextIndex + 1}/${currentRecommendedIds.length}`);
+              console.log(`✅ [推荐-步骤] 使用缓存曲目 - track_id: ${selectedTrackId}，索引: ${nextIndex + 1}/${currentRecommendedIds.length}`);
               appendSystemLog(`[推荐] 使用缓存曲目 - track_id: ${selectedTrackId}，索引: ${nextIndex + 1}/${currentRecommendedIds.length}`);
               break;
             }
+            console.log('[推荐-步骤] 无缓存，正在请求 Jamendo 曲目详情 track_id=', selectedTrackId, '(若此处后无新日志且界面卡住，多为 Jamendo 超时或网络问题)');
             try {
               track = await jamendoApi.getTrackById(selectedTrackId);
               setRecommendedTrackIndex(nextIndex + 1);
@@ -968,7 +1095,7 @@ export const usePlayerStore = create<PlayerStore>()(
             const listIndex = get().recommendedTrackIndex - 1;
             setCurrentTrack(track);
             set({ currentTrackIndex: listIndex >= 0 ? listIndex : 0 });
-            saveToStorage(get().favorites, get().ratings, get().userPreferences, listIndex >= 0 ? listIndex : 0, get().history);
+            saveToStorage(get().favorites, get().ratings, get().userPreferences, listIndex >= 0 ? listIndex : 0, get().history, get().consecutivePlayCount, get().favoriteArtists, get().favoriteAlbums);
             setIsPlaying(true); // 自动播放新歌曲
             // 剩余 ≤2 首时在列表下方补充新推荐
             const nextIdx = get().recommendedTrackIndex;
@@ -1015,6 +1142,27 @@ export const usePlayerStore = create<PlayerStore>()(
         return false;
       },
 
+      prependDiversityTrackAndPlay: async () => {
+        const username = getCurrentUser();
+        if (!username) return;
+        const { setLoading, setCurrentTrack, setIsPlaying, setRecommendedTrackIds } = get();
+        setLoading(true);
+        try {
+          const diversityTrackId = await getDiversityRecommendation({ username });
+          if (!diversityTrackId) return;
+          const diversityTrack = await jamendoApi.getTrackById(diversityTrackId);
+          if (!diversityTrack) return;
+          const { recommendedTrackIds: currentIds, recommendedTrackDetails: currentDetails } = get();
+          const newIds = [diversityTrackId, ...currentIds];
+          const newDetails = [diversityTrack, ...Object.values(currentDetails)];
+          setRecommendedTrackIds(newIds, undefined, newDetails, '探索新领域');
+          setCurrentTrack(diversityTrack);
+          setIsPlaying(true);
+        } finally {
+          setLoading(false);
+        }
+      },
+
       togglePlayPause: () => {
         const newState = !get().isPlaying;
         set({ isPlaying: newState });
@@ -1025,10 +1173,7 @@ export const usePlayerStore = create<PlayerStore>()(
       },
 
       setRecommendedTrackIds: (ids, scores, detailsCache, reason) => {
-        // #region agent log
-        const prevLen = get().recommendedTrackIds.length;
-        fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'store.ts:setRecommendedTrackIds',message:'setRecommendedTrackIds',data:{idsLen:ids.length,prevLen},timestamp:Date.now(),hypothesisId:'H4'})}).catch(()=>{});
-        // #endregion
+        if (reason === '用户偏好已更新') skipPreloadUntilTimestamp = Date.now() + 5000;
         const prev = get().recommendedTrackScores;
         const recommendedTrackScores: Record<string, number> = {};
         ids.forEach((id, i) => {
@@ -1084,10 +1229,13 @@ export const usePlayerStore = create<PlayerStore>()(
           currentTrack: null,
           isPlaying: false,
           consecutivePlayCount: 0,
+          favoriteArtists: [],
+          favoriteAlbums: [],
+          recommendedSongsPlayedCount: 0,
         });
         
         // 保存到localStorage（清空状态）
-        saveToStorage(emptyFavorites, emptyRatings, emptyPreferences, 0, emptyHistory);
+        saveToStorage(emptyFavorites, emptyRatings, emptyPreferences, 0, emptyHistory, 0, [], []);
       },
 
       hydrateFromStorage: () => {
@@ -1109,6 +1257,8 @@ export const usePlayerStore = create<PlayerStore>()(
           : { genres: [], instruments: [], moods: [], themes: [], genresWeights: {}, instrumentsWeights: {}, moodsWeights: {}, themesWeights: {} };
         const history = Array.isArray(raw.history) ? (raw.history as HistoryRecord[]) : [];
         const currentTrackIndex = typeof raw.currentTrackIndex === 'number' ? raw.currentTrackIndex : 0;
+        const favoriteArtists = Array.isArray(raw.favoriteArtists) ? raw.favoriteArtists : [];
+        const favoriteAlbums = Array.isArray(raw.favoriteAlbums) ? raw.favoriteAlbums : [];
         set({
           favorites,
           ratings,
@@ -1127,6 +1277,9 @@ export const usePlayerStore = create<PlayerStore>()(
           lastPreferenceOperation: undefined,
           lastRecommendationPreferencesVersion: 0,
           consecutivePlayCount: 0,
+          favoriteArtists,
+          favoriteAlbums,
+          recommendedSongsPlayedCount: 0,
         });
       },
 

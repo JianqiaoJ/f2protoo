@@ -1,0 +1,16 @@
+[Unit]
+Description=F2Proto Music Player (Node API + Frontend)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/f2proto
+ExecStart=/usr/bin/env node server.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/opt/f2proto/server.log
+StandardError=append:/opt/f2proto/server.log
+
+[Install]
+WantedBy=multi-user.target

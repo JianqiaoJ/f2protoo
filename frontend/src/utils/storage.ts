@@ -65,6 +65,10 @@ const SEREN_LLM_PROVIDER_KEY = 'seren-llm-provider';
 
 const VALID_PROVIDERS: LLMProvider[] = ['deepseek', 'deepseek_reason', 'gemini_25', 'gemini', 'gemini_3_flash', 'chatgpt4o', 'chatgpt5', 'qwen', 'kimi_k2_5'];
 
+/** 系统 B 默认 DeepSeek Reason；系统 A 默认 DeepSeek Chat */
+export const getDefaultSerenLLMProvider = (system: 'A' | 'B'): LLMProvider =>
+  system === 'B' ? 'deepseek_reason' : 'deepseek';
+
 export const getSerenLLMProvider = (): LLMProvider => {
   const v = localStorage.getItem(SEREN_LLM_PROVIDER_KEY);
   if (v && VALID_PROVIDERS.includes(v as LLMProvider)) return v as LLMProvider;

@@ -1,6 +1,6 @@
 // 推荐API
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:3000';
+import { API_BASE_URL } from './baseUrl';
 
 /** 推荐请求触发原因，用于后端日志 */
 export type RecommendTrigger =
@@ -39,6 +39,8 @@ export interface RecommendRequest {
   trigger?: RecommendTrigger;
   /** 当 trigger 为 preferences_updated 时可选传入：偏好更新原因（如 favorite/rating_confirm），后端日志会明确展示为 收藏/评分高/听歌完播 等 */
   preferenceUpdateReason?: string;
+  /** 当 trigger 为 user_expressed_preference 时可选传入：用户主动表达喜好的消息原文，后端日志会打印在推荐结果原因中 */
+  triggerUserMessage?: string;
 }
 
 /** 后端返回的首曲完整信息，与 JamendoTrack 一致 */
@@ -74,7 +76,8 @@ export interface RecommendResult {
   filteredPlaylist?: string[];
 }
 
-const RECOMMEND_TIMEOUT_MS = 25000;
+/** 推荐接口超时：后端加载 raw.tsv / 打分可能较慢，尤其是首次请求，延长至 2 分钟避免误报 */
+const RECOMMEND_TIMEOUT_MS = 120000;
 
 /**
  * 获取推荐歌曲（含首曲详情时可直接用 firstTrack，减少一次前端请求 Jamendo）
@@ -112,7 +115,7 @@ export const getRecommendations = async (
     clearTimeout(timeoutId);
     if (error?.name === 'AbortError') {
       console.error('获取推荐超时:', RECOMMEND_TIMEOUT_MS, 'ms', API_BASE_URL);
-      throw new Error(`推荐请求超时(${RECOMMEND_TIMEOUT_MS}ms)，请检查后端是否启动: ${API_BASE_URL}`);
+      throw new Error(`推荐请求超时(${RECOMMEND_TIMEOUT_MS / 1000}秒)，可能是后端处理过慢（如首次加载数据）或未启动，请稍后重试或检查: ${API_BASE_URL}`);
     }
     console.error('获取推荐失败:', error);
     throw error;
@@ -159,5 +162,28 @@ export const getRecommendWhy = async (
   } catch (error) {
     console.error('获取推荐理由失败:', error);
     return null;
+  }
+};
+
+/** 记录「为什么推荐这首」按钮点击及系统返回的解释消息 */
+export const logWhyThisTrack = async (
+  username: string,
+  explanation: string,
+  trackId?: string,
+  trackName?: string
+): Promise<void> => {
+  try {
+    await fetch(`${API_BASE_URL}/api/log/why-this-track`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username,
+        track_id: trackId ?? null,
+        track_name: trackName ?? null,
+        explanation,
+      }),
+    });
+  } catch (e) {
+    console.warn('记录为什么推荐这首失败:', e);
   }
 };

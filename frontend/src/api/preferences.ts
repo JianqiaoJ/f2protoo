@@ -1,17 +1,20 @@
 import axios from 'axios';
+import { API_BASE_URL } from './baseUrl';
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:3000';
-
-const BACKEND_CHECK_TIMEOUT_MS = 3000;
+/** 冷启动健康检查超时：后端首次请求可能较慢（加载 DB/TSV），给足时间 */
+const BACKEND_CHECK_TIMEOUT_MS = 30000;
 
 /**
- * 冷启动前快速检查后端是否可用，避免长时间等待保存偏好超时
+ * 冷启动前检查后端是否可用，避免保存偏好时长时间无响应
  */
 export async function checkBackendHealth(): Promise<void> {
   try {
     await axios.get(`${API_BASE_URL}/api/users`, { timeout: BACKEND_CHECK_TIMEOUT_MS });
   } catch (error: any) {
-    const hint = '请先在 backend 目录运行: npm run start 或 node server.js';
+    const isDeployed = API_BASE_URL !== '' && !API_BASE_URL.includes('localhost');
+    const hint = isDeployed
+      ? '若已部署到服务器，请在服务器上执行: cd /opt/music-player-backend && sudo node server.js >> backend.log 2>&1 & 然后查看 tail backend.log'
+      : `请确认 backend 已启动（在 backend 目录运行 node server.js），并确认地址为 ${API_BASE_URL}`;
     const msg = error?.code === 'ECONNABORTED'
       ? `连接后端超时(${BACKEND_CHECK_TIMEOUT_MS}ms)。${hint}`
       : `无法连接后端(${API_BASE_URL})。${hint}`;
@@ -81,13 +84,13 @@ export async function saveUserPreferences(
       operation: options?.operation ?? 'unknown',
       conversation_content: options?.conversationContent ?? null,
     };
-    const SAVE_TIMEOUT_MS = 15000;
+    const SAVE_TIMEOUT_MS = 30000;
     const response = await axios.post(`${API_BASE_URL}/api/preferences/save`, payload, { timeout: SAVE_TIMEOUT_MS });
     return response.data;
   } catch (error: any) {
     const hint = '请先启动后端: 在 backend 目录运行 npm run start 或 node server.js';
     const msg = error?.code === 'ECONNABORTED'
-      ? `保存偏好超时(15000ms)，请检查后端是否启动: ${API_BASE_URL}。${hint}`
+      ? `保存偏好超时(30s)，请检查后端是否启动: ${API_BASE_URL}。${hint}`
       : (error?.message || '保存用户偏好失败');
     console.error('保存用户偏好失败:', msg, error);
     throw new Error(msg);

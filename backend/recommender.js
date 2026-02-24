@@ -1,6 +1,7 @@
 // 推荐算法实现模块
 
 import { readFileSync, existsSync } from 'fs';
+import { readFile } from 'fs/promises';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -56,6 +57,35 @@ function addTagToIndex(tagType, tag, trackId) {
   set.add(trackId);
 }
 
+function loadTrackTagsFromContent(content) {
+  const lines = content.split('\n');
+  trackTagsMap.clear();
+  allTrackIds = [];
+  tagToTrackIds = { genres: new Map(), instruments: new Map(), moods: new Map(), themes: new Map() };
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line) {
+      const columns = line.split('\t');
+      if (columns[0]) {
+        const trackId = columns[0];
+        allTrackIds.push(trackId);
+        if (columns.length > 5) {
+          const tagsString = columns.slice(5).join('\t');
+          const tags = parseTags(tagsString);
+          trackTagsMap.set(trackId, tags);
+          (tags.genres || []).forEach((t) => addTagToIndex('genres', t, trackId));
+          (tags.instruments || []).forEach((t) => addTagToIndex('instruments', t, trackId));
+          const moodThemeTags = [...new Set([...(tags.moods || []), ...(tags.themes || [])])];
+          moodThemeTags.forEach((t) => {
+            addTagToIndex('moods', t, trackId);
+            addTagToIndex('themes', t, trackId);
+          });
+        }
+      }
+    }
+  }
+}
+
 function loadTrackTags() {
   try {
     let tsvPath = join(__dirname, 'raw.tsv');
@@ -63,43 +93,29 @@ function loadTrackTags() {
       tsvPath = join(__dirname, '..', 'raw.tsv');
     }
     const content = readFileSync(tsvPath, 'utf-8');
-    const lines = content.split('\n');
-
-    trackTagsMap.clear();
-    allTrackIds = [];
-    tagToTrackIds = { genres: new Map(), instruments: new Map(), moods: new Map(), themes: new Map() };
-
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (line) {
-        const columns = line.split('\t');
-        if (columns[0]) {
-          const trackId = columns[0];
-          allTrackIds.push(trackId);
-
-          if (columns.length > 5) {
-            const tagsString = columns.slice(5).join('\t');
-            const tags = parseTags(tagsString);
-            trackTagsMap.set(trackId, tags);
-            (tags.genres || []).forEach((t) => addTagToIndex('genres', t, trackId));
-            (tags.instruments || []).forEach((t) => addTagToIndex('instruments', t, trackId));
-            // mood 与 theme 是同一类标签，索引时同时写入 moods 和 themes，便于偏好任一侧都能命中
-            const moodThemeTags = [...new Set([...(tags.moods || []), ...(tags.themes || [])])];
-            moodThemeTags.forEach((t) => {
-              addTagToIndex('moods', t, trackId);
-              addTagToIndex('themes', t, trackId);
-            });
-          }
-        }
-      }
-    }
-
+    loadTrackTagsFromContent(content);
     console.log(`已加载 ${allTrackIds.length} 首歌曲的标签数据`);
     return true;
   } catch (error) {
     console.error('加载标签数据失败:', error);
     return false;
   }
+}
+
+/** 异步加载 TSV，避免阻塞事件循环；启动时调用，推荐接口响应前数据已就绪 */
+export function loadTrackTagsAsync() {
+  let tsvPath = join(__dirname, 'raw.tsv');
+  if (!existsSync(tsvPath)) {
+    tsvPath = join(__dirname, '..', 'raw.tsv');
+  }
+  return readFile(tsvPath, 'utf-8').then((content) => {
+    loadTrackTagsFromContent(content);
+    console.log(`已加载 ${allTrackIds.length} 首歌曲的标签数据（异步）`);
+    return true;
+  }).catch((error) => {
+    console.error('加载标签数据失败:', error);
+    return false;
+  });
 }
 
 // 根据合并偏好得到候选 trackId 集合（至少匹配一个标签），用于只对候选打分
@@ -365,17 +381,28 @@ function ensureDiversity(recommendedTracks, maxSimilarity = 0.7) {
 // 生成推荐
 // excludedTags: 用户明确不喜欢的 tag，带这些 tag 的歌曲一律不推荐 { genres: [], instruments: [], moods: [], themes: [] }
 // additionalExcludedIds: 额外要排除的 track_id 列表（如历史已推荐过的曲目），不再推荐
+// useOnlyExplicitPrefs: 为 true 时（如用户主动表达偏好插播）仅按显式偏好打分，不合并隐式偏好
 export function generateRecommendations(
   explicitPrefs,
   behaviorHistory,
   currentTrackId,
   count = 3,
   excludedTags = {},
-  additionalExcludedIds = []
+  additionalExcludedIds = [],
+  useOnlyExplicitPrefs = false
 ) {
-  // 如果标签数据未加载，先加载
+  // 如果标签数据未加载，先加载（兜底：首请求前 TSV 未就绪时同步加载）
   if (trackTagsMap.size === 0) {
     loadTrackTags();
+  }
+
+  // 打分时只使用最近 N 条行为，避免行为历史过大导致单次请求卡死
+  const MAX_BEHAVIOR_FOR_SCORING = 200;
+  const behaviorForScoring = behaviorHistory.length > MAX_BEHAVIOR_FOR_SCORING
+    ? behaviorHistory.slice(-MAX_BEHAVIOR_FOR_SCORING)
+    : behaviorHistory;
+  if (behaviorHistory.length > MAX_BEHAVIOR_FOR_SCORING) {
+    console.log(`📐 行为历史 ${behaviorHistory.length} 条，打分仅用最近 ${MAX_BEHAVIOR_FOR_SCORING} 条`);
   }
 
   const excluded = {
@@ -400,32 +427,40 @@ export function generateRecommendations(
     if (excluded.themes.length) console.log(`   主题: ${excluded.themes.join(', ')}`);
   }
   
-  // 提取隐式偏好
-  const implicitPrefs = extractImplicitPreferences(behaviorHistory);
-  
-  if (implicitPrefs.genres.length > 0 || implicitPrefs.instruments.length > 0 || 
-      implicitPrefs.moods.length > 0 || implicitPrefs.themes.length > 0) {
-    console.log(`📊 隐式偏好 (从行为历史提取):`);
-    if (implicitPrefs.genres.length > 0) {
-      console.log(`   风格: ${implicitPrefs.genres.join(', ')}`);
+  // 用户主动表达偏好插播时：仅按表达 tag 打分，不合并隐式偏好
+  let combinedPrefs;
+  if (useOnlyExplicitPrefs) {
+    combinedPrefs = {
+      genres: [...(explicitPrefs.genres || [])],
+      instruments: [...(explicitPrefs.instruments || [])],
+      moods: [...(explicitPrefs.moods || [])],
+      themes: [...(explicitPrefs.themes || [])]
+    };
+    console.log(`📌 仅按表达偏好，未使用隐式偏好`);
+  } else {
+    const implicitPrefs = extractImplicitPreferences(behaviorHistory);
+    if (implicitPrefs.genres.length > 0 || implicitPrefs.instruments.length > 0 ||
+        implicitPrefs.moods.length > 0 || implicitPrefs.themes.length > 0) {
+      console.log(`📊 隐式偏好 (从行为历史提取):`);
+      if (implicitPrefs.genres.length > 0) {
+        console.log(`   风格: ${implicitPrefs.genres.join(', ')}`);
+      }
+      if (implicitPrefs.instruments.length > 0) {
+        console.log(`   乐器: ${implicitPrefs.instruments.join(', ')}`);
+      }
+      if (implicitPrefs.moods.length > 0) {
+        console.log(`   情绪: ${implicitPrefs.moods.join(', ')}`);
+      }
+      if (implicitPrefs.themes.length > 0) {
+        console.log(`   主题: ${implicitPrefs.themes.join(', ')}`);
+      }
     }
-    if (implicitPrefs.instruments.length > 0) {
-      console.log(`   乐器: ${implicitPrefs.instruments.join(', ')}`);
-    }
-    if (implicitPrefs.moods.length > 0) {
-      console.log(`   情绪: ${implicitPrefs.moods.join(', ')}`);
-    }
-    if (implicitPrefs.themes.length > 0) {
-      console.log(`   主题: ${implicitPrefs.themes.join(', ')}`);
-    }
+    combinedPrefs = combinePreferences(
+      explicitPrefs,
+      implicitPrefs,
+      behaviorHistory.length
+    );
   }
-  
-  // 合并偏好
-  const combinedPrefs = combinePreferences(
-    explicitPrefs,
-    implicitPrefs,
-    behaviorHistory.length
-  );
   
   console.log(`🔀 合并后的偏好:`);
   if (combinedPrefs.genres.length > 0) {
@@ -449,9 +484,23 @@ export function generateRecommendations(
     ...(Array.isArray(additionalExcludedIds) ? additionalExcludedIds : []).map(normalizeId).filter(Boolean)
   ]);
 
+  // 下面打分循环用 behaviorForScoring，避免超大 behaviorHistory 卡死
+  const _behaviorForScoring = behaviorForScoring;
+
   // 只对候选集打分：有偏好时用「至少匹配一个标签」的 trackId 集合，否则用全量（冷启动随机）
   const candidateSet = getCandidateTrackIds(combinedPrefs);
-  const idsToScore = candidateSet.size > 0 ? Array.from(candidateSet) : allTrackIds;
+  let idsToScore = candidateSet.size > 0 ? Array.from(candidateSet) : allTrackIds;
+  // 候选过多时只对随机子集打分，避免单次请求卡住（如 4 万+ 冷启动）
+  const MAX_CANDIDATES_TO_SCORE = 10000;
+  if (idsToScore.length > MAX_CANDIDATES_TO_SCORE) {
+    const originalLen = idsToScore.length;
+    for (let i = 0; i < MAX_CANDIDATES_TO_SCORE; i++) {
+      const j = i + Math.floor(Math.random() * (idsToScore.length - i));
+      [idsToScore[i], idsToScore[j]] = [idsToScore[j], idsToScore[i]];
+    }
+    idsToScore = idsToScore.slice(0, MAX_CANDIDATES_TO_SCORE);
+    console.log(`📐 候选集过大，已随机抽样 ${MAX_CANDIDATES_TO_SCORE} 首进行打分（原 ${originalLen}）`);
+  }
   if (idsToScore.length > 0 && idsToScore.length <= 20) {
     console.log(`📐 候选集大小: ${idsToScore.length}（偏好匹配）`);
   } else if (candidateSet.size > 0) {
@@ -477,7 +526,7 @@ export function generateRecommendations(
       
       // 统计每个 track_id 的收藏次数（用 normalizeId 统一格式，避免 track_123 与 123 重复计）
       const favoriteCounts = new Map();
-      behaviorHistory.forEach(record => {
+      _behaviorForScoring.forEach(record => {
         if (record.is_favorited) {
           const nid = normalizeId(record.track_id);
           const count = favoriteCounts.get(nid) || 0;
@@ -485,7 +534,7 @@ export function generateRecommendations(
         }
       });
       
-      behaviorHistory.forEach(record => {
+      _behaviorForScoring.forEach(record => {
         const nidRec = normalizeId(record.track_id);
         const favoriteCount = favoriteCounts.get(nidRec) || (record.is_favorited ? 1 : 0);
         if (nidRec === normalizeId(trackId)) {
@@ -517,8 +566,8 @@ export function generateRecommendations(
       });
       
       // 归一化行为分数
-      if (behaviorHistory.length > 0) {
-        behaviorScore = behaviorScore / behaviorHistory.length;
+      if (_behaviorForScoring.length > 0) {
+        behaviorScore = behaviorScore / _behaviorForScoring.length;
       }
       
       // 最终分数
@@ -746,6 +795,3 @@ export function getAllTrackIds() {
 }
 
 export { getTrackTagsByAnyId };
-
-// 初始化加载标签数据
-loadTrackTags();

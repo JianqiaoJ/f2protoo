@@ -1,10 +1,10 @@
 // 用户数据
+import { API_BASE_URL } from '../api/baseUrl';
+
 export interface User {
   username: string;
   password: string;
 }
-
-const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:3000';
 
 // 验证用户登录（通过后端 API）
 export const validateUser = async (username: string, password: string): Promise<boolean> => {

@@ -33,3 +33,12 @@ Thumbs.db
 f2proto-deploy.tar.gz
 deploy-package.tar.gz
 deploy-log.txt
+
+# Local DB and build output
+*.db
+backend/public/
+
+# Avoid committing symlinks/binaries in repo root
+/node
+/tsc
+/music-player-backend@1.0.0

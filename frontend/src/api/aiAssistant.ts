@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { getSerenLLMProvider } from '../utils/storage';
-import { chineseToTag } from '../utils/tagToChinese';
+import { chineseToTag, tagToChinese, tagWithChinese } from '../utils/tagToChinese';
 import { appendSystemLog } from './logs';
 
 const DEEPSEEK_API_KEY = 'sk-adfb9647455540ad807e6511ae8abe98';
@@ -19,16 +19,10 @@ function openRouterErrorHint(errMsg: string, status?: number): string {
   if (!isAuthError) return '';
   return ' （请到 https://openrouter.ai/keys 获取 API Key，在本项目 frontend 目录下的 .env 或 .env.local 中设置 VITE_OPENROUTER_API_KEY=sk-or-v1-xxx；.env.example 仅为模板，不会被读取。参见 https://openrouter.ai/docs/quickstart）';
 }
-const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:3000';
+import { API_BASE_URL } from './baseUrl';
 
 /** 供 OpenRouter 使用的完整 headers（Authorization + 可选 Referer，部分环境下可避免 401） */
 function getOpenRouterHeaders(): Record<string, string> {
-  // #region agent log
-  const keyLen = OPENROUTER_API_KEY.length;
-  const keyEmpty = keyLen === 0;
-  const keyPrefixOk = OPENROUTER_API_KEY.startsWith('sk-or-v1');
-  fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'aiAssistant.ts:getOpenRouterHeaders', message: 'OpenRouter key at request build', data: { keyLength: keyLen, keyEmpty, keyPrefixOk }, timestamp: Date.now(), hypothesisId: 'H1-H4' }) }).catch(() => {});
-  // #endregion
   const h: Record<string, string> = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${OPENROUTER_API_KEY}`,
@@ -50,8 +44,12 @@ function getChoiceContent(choice: any, fallback: string): string {
   return content;
 }
 
-/** 根据当前设置返回 LLM 请求的 url、headers、model（DeepSeek 直连或 Open Router） */
-function getLLMConfig(): { url: string; headers: Record<string, string>; model: string } {
+/** DeepSeek Chat API 的 max_tokens 有效范围为 [1, 8192]，其他模型可用更大值 */
+const DEEPSEEK_MAX_TOKENS = 8192;
+const DEFAULT_MAX_TOKENS = 16384;
+
+/** 根据当前设置返回 LLM 请求的 url、headers、model、maxTokens（DeepSeek 直连或 Open Router） */
+function getLLMConfig(): { url: string; headers: Record<string, string>; model: string; maxTokens: number } {
   const provider = getSerenLLMProvider();
   if (provider === 'deepseek') {
     return {
@@ -61,6 +59,7 @@ function getLLMConfig(): { url: string; headers: Record<string, string>; model: 
         Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
       },
       model: 'deepseek-chat',
+      maxTokens: DEEPSEEK_MAX_TOKENS,
     };
   }
   if (provider === 'deepseek_reason') {
@@ -71,28 +70,29 @@ function getLLMConfig(): { url: string; headers: Record<string, string>; model: 
         Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
       },
       model: 'deepseek-reasoner',
+      maxTokens: DEEPSEEK_MAX_TOKENS,
     };
   }
   if (provider === 'gemini_25') {
-    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'google/gemini-2.5-pro' };
+    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'google/gemini-2.5-pro', maxTokens: DEFAULT_MAX_TOKENS };
   }
   if (provider === 'gemini') {
-    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'google/gemini-3-pro-preview' };
+    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'google/gemini-3-pro-preview', maxTokens: DEFAULT_MAX_TOKENS };
   }
   if (provider === 'gemini_3_flash') {
-    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'google/gemini-3-flash-preview' };
+    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'google/gemini-3-flash-preview', maxTokens: DEFAULT_MAX_TOKENS };
   }
   if (provider === 'kimi_k2_5') {
-    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'moonshotai/kimi-k2.5' };
+    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'moonshotai/kimi-k2.5', maxTokens: DEFAULT_MAX_TOKENS };
   }
   if (provider === 'chatgpt4o') {
-    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'openai/gpt-4o' };
+    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'openai/gpt-4o', maxTokens: DEFAULT_MAX_TOKENS };
   }
   if (provider === 'qwen') {
-    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'qwen/qwen3-max-thinking' };
+    return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'qwen/qwen3-max-thinking', maxTokens: DEFAULT_MAX_TOKENS };
   }
   // chatgpt5：Open Router 上 OpenAI 系（GPT-5.2）
-  return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'openai/gpt-5.2-chat' };
+  return { url: OPENROUTER_URL, headers: getOpenRouterHeaders(), model: 'openai/gpt-5.2-chat', maxTokens: DEFAULT_MAX_TOKENS };
 }
 
 /** 供设置弹窗展示：根据 provider 返回实际使用的模型名 */
@@ -131,11 +131,12 @@ export interface TrackInfo {
   };
 }
 
-/** 描述歌曲时使用的三个解释维度，供 LLM 统一遵循 */
+/** 描述歌曲时使用的三个解释维度，供 LLM 统一遵循；且不做人声判断、不出现人声表述 */
 const SONG_DESCRIPTION_LAYERS = `描述时请从三个维度组织内容（可自然融合在一段话里）：
 1. 声学层（acoustic）：从乐器、节奏、编曲等听感出发，如木吉他+轻节奏→自然、柔和；旋律柔和、编曲简单。
 2. 情绪层（affective）：这首歌带给人的情绪与感受，如轻松、陪伴感、温暖、不抢注意力、有生活感。
-3. 情境层（contextual）：适合的聆听场景，如聊天、通勤、日常陪伴、放松时聆听。`;
+3. 情境层（contextual）：适合的聆听场景，如聊天、通勤、日常陪伴、放松时聆听。
+**禁止**：不要做歌曲是否有人声的判断，描述中不要出现「人声」「有/无人声」「vocal」「人声/纯音乐」等表述。`;
 
 export const aiAssistantApi = {
   async chat(
@@ -166,11 +167,14 @@ export const aiAssistantApi = {
 - 不要主动提及具体歌曲名；分析当前播放时可简要描述风格/情绪，不「推荐」其他具体歌曲
 - 语气友好、简洁
 
+**关于人声/纯音乐：**
+- **不要**对歌曲做是否有人声的判断，在推荐理由或歌曲描述中**不要出现**「人声」「有/无人声」「vocal」「人声/纯音乐」等表述。
+- 当用户要求听「人声歌曲」「有人声的歌」「非纯音乐」「带人声」等时，礼貌说明：**曲库内没有按人声/非人声区分的风格**，目前无法提供这类推荐；建议用户用风格、乐器、情绪等描述偏好，系统会据此推荐。
+
 ${currentTrack ? `当前正在播放：${currentTrack.name} - ${currentTrack.artist}` : ''}
 ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(', ') || '无'}，乐器-${currentTrack.tags.instruments.join(', ') || '无'}，情绪-${currentTrack.tags.moods.join(', ') || '无'}，主题-${currentTrack.tags.themes.join(', ') || '无'}` : ''}`;
 
       const cfg = getLLMConfig();
-      const maxTokens = 8192; // 主对话尽量给足上限，部分模型有服务端上限会自行截断
       const response = await axios.post(
         cfg.url,
         {
@@ -180,8 +184,8 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
             ...messages,
           ],
           temperature: 0.7,
-          max_tokens: maxTokens,
-          max_completion_tokens: maxTokens, // 部分厂商仅认此参数，与 max_tokens 保持一致
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         { headers: cfg.headers }
       );
@@ -233,6 +237,52 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
     return this.chat(messages, currentTrack);
   },
 
+  /** 冷启动引导例句：根据该用户在 DB 中的偏好生成一句易懂的示例，供「请用一句话描述…」使用；无偏好时生成通用例句 */
+  async generateColdStartExample(preferences: {
+    genres: string[];
+    instruments: string[];
+    moods: string[];
+    themes: string[];
+  }): Promise<string> {
+    const hasPrefs =
+      (preferences.genres?.length ?? 0) > 0 ||
+      (preferences.instruments?.length ?? 0) > 0 ||
+      (preferences.moods?.length ?? 0) > 0 ||
+      (preferences.themes?.length ?? 0) > 0;
+    const genreStr = (preferences.genres ?? []).slice(0, 3).join('、') || '无';
+    const instrumentStr = (preferences.instruments ?? []).slice(0, 3).join('、') || '无';
+    const moodStr = (preferences.moods ?? []).slice(0, 2).join('、') || '无';
+    const themeStr = (preferences.themes ?? []).slice(0, 2).join('、') || '无';
+    try {
+      const systemPrompt = hasPrefs
+        ? `你是音乐推荐小助手。当前用户在数据库里已有偏好：风格 ${genreStr}，乐器 ${instrumentStr}，情绪 ${moodStr}，主题 ${themeStr}。请根据这些偏好，生成一句简短、易懂的中文示例（一句话），方便用户在冷启动时照着写。要求：只输出「例如："……"」这一句，引号内是一句自然的中文描述（可结合上述偏好），不要解释、不要换行。`
+        : `你是音乐推荐小助手。用户还没有任何偏好。请生成一句简短、易懂的中文示例（一句话），方便用户冷启动时照着描述喜好。要求：只输出「例如："……"」这一句，引号内是一句自然的中文（如喜欢的风格、乐器、心情），不要解释、不要换行。`;
+      const cfg = getLLMConfig();
+      const response = await axios.post(
+        cfg.url,
+        {
+          model: cfg.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: '请生成一句示例' },
+          ],
+          temperature: 0.5,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
+        },
+        { headers: cfg.headers }
+      );
+      if (!response.data?.choices?.length) throw new Error('无效响应');
+      const raw = getChoiceContent(response.data.choices[0], '例如："我喜欢摇滚和电子音乐，喜欢钢琴，现在想放松"');
+      const trimmed = (raw || '').trim();
+      if (trimmed && /例如[：:]/.test(trimmed)) return trimmed;
+      return '例如："我喜欢摇滚和电子音乐，喜欢钢琴，现在想放松"';
+    } catch (e) {
+      console.warn('生成冷启动例句失败:', e);
+      return '例如："我喜欢摇滚和电子音乐，喜欢钢琴，现在想放松"';
+    }
+  },
+
   // 将用户输入映射到raw.tsv中的标签
   async mapUserInputToTags(
     userInput: string,
@@ -260,6 +310,7 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
 4. 如果用户只提到了乐器，就只返回乐器，不要添加其他标签
 5. 如果用户说"放松"、"relaxed"等，应该映射到"relaxing"或"relaxation"（如果它们在列表中）
 6. 如果找不到完全匹配的标签，返回空数组，不要猜测或创造新标签
+7. **不要**将「人声」「有人声」「vocal」「非纯音乐」「带人声」等与人声/纯音乐相关的表述映射到任何标签；若用户仅表达此类需求，全部返回空数组
 
 返回JSON格式：
 {
@@ -272,6 +323,7 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
 只返回JSON，不要其他文字。如果用户没有明确提到某类标签，或找不到匹配的标签，返回空数组。`;
 
       const cfg = getLLMConfig();
+      // [场景：其它] 用户输入→标签 JSON 解析，建议 1024（原 500 易被截断）
       const response = await axios.post(
         cfg.url,
         {
@@ -281,8 +333,8 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
             { role: 'user', content: userInput },
           ],
           temperature: 0.3,
-          max_tokens: 500,
-          max_completion_tokens: 500,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         { headers: cfg.headers }
       );
@@ -402,6 +454,160 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
     }
   },
 
+  /**
+   * 将 extractPreferences 返回的标签（可能含中文）解析为曲库中的英文 tag。
+   * 用于「不喜欢 xxx」场景：extract 已识别 isDislike 与标签，此处仅做标签名→库内 tag 的映射，避免 mapUserInputToTags 对整句「不喜欢pop」返回空。
+   */
+  resolveExtractedTagsToLibrary(
+    extractedPrefs: { genres: string[]; instruments: string[]; moods: string[]; themes: string[] },
+    availableTags: { genres: string[]; instruments: string[]; moods: string[]; themes: string[] }
+  ): { genres: string[]; instruments: string[]; moods: string[]; themes: string[] } {
+    const findSimilar = (tag: string, available: string[]): string | null => {
+      const lower = tag.toLowerCase();
+      if (available.includes(tag)) return tag;
+      const fromZh = chineseToTag(tag);
+      if (fromZh && available.includes(fromZh)) return fromZh;
+      return available.find(a => a.toLowerCase() === lower || a.toLowerCase().includes(lower) || lower.includes(a.toLowerCase())) ?? null;
+    };
+    const resolveList = (raw: string[], available: string[]): string[] => {
+      const out: string[] = [];
+      raw.forEach(tag => {
+        const resolved = findSimilar(tag, available);
+        if (resolved && !out.includes(resolved)) out.push(resolved);
+      });
+      return out;
+    };
+    return {
+      genres: resolveList(extractedPrefs.genres || [], availableTags.genres),
+      instruments: resolveList(extractedPrefs.instruments || [], availableTags.instruments),
+      moods: resolveList(extractedPrefs.moods || [], availableTags.moods),
+      themes: resolveList(extractedPrefs.themes || [], availableTags.themes),
+    };
+  },
+
+  /**
+   * 不喜欢解析兜底：当 LLM 未提取出标签时，从用户输入中按顿号/逗号分段，匹配曲库中的标签（中文名或英文名），用于厌恶分支。
+   * 仅当输入包含「不喜欢」「讨厌」「别推荐」「不要」时生效。
+   */
+  parseDislikeFallback(
+    userInput: string,
+    availableTags: { genres: string[]; instruments: string[]; moods: string[]; themes: string[] }
+  ): { genres: string[]; instruments: string[]; moods: string[]; themes: string[] } {
+    const raw = String(userInput || '').trim();
+    if (!/不喜欢|讨厌|别推荐|不要/.test(raw)) {
+      return { genres: [], instruments: [], moods: [], themes: [] };
+    }
+    const segments = raw
+      .replace(/，/g, ',')
+      .split(/[,、，\s]+/)
+      .map(s => s.trim())
+      .filter(Boolean);
+    const result = { genres: [] as string[], instruments: [] as string[], moods: [] as string[], themes: [] as string[] };
+    const categories = ['genres', 'instruments', 'moods', 'themes'] as const;
+    for (const cat of categories) {
+      const list = availableTags[cat];
+      for (const tag of list) {
+        const zh = tagToChinese(tag);
+        const matched = segments.some(seg => seg === tag || seg === zh);
+        if (matched && !result[cat].includes(tag)) result[cat].push(tag);
+      }
+    }
+    return result;
+  },
+
+  /** 当用户请求系统无法支持时（库里没有的风格/乐器/曲风，或要求近n年歌曲）：生成「暂时无法支持」的回复并推荐类似风格（返回的 similarTags 仅从 availableTags 中选取，用于后续推荐） */
+  async getUnsupportedReplyWithSimilar(
+    userInput: string,
+    availableTags: { genres: string[]; instruments: string[]; moods: string[]; themes: string[] },
+    reason: 'tags_not_in_library' | 'year_filter'
+  ): Promise<{ reply: string; similarTags: { genres: string[]; instruments: string[]; moods: string[]; themes: string[] } }> {
+    const reasonDesc =
+      reason === 'year_filter'
+        ? '用户要求按年份筛选（如近n年、某年后的歌），系统暂不支持按年份筛选。'
+        : '用户想要的风格、乐器或曲风在曲库中不存在。';
+    const systemPrompt = `你是音乐推荐小助手。当前情况：${reasonDesc}
+
+用户原话：${userInput}
+
+请完成两件事：
+1. 用一句简短、友好的中文回复告知用户「暂时无法支持」并说明原因，同时说明会为他推荐类似风格的歌曲。
+2. 从下面「可用标签」中选出与用户意图最接近的类似风格（每类最多 3 个），用于后续推荐。必须严格只从列表中选，不得编造。
+
+可用风格(genres)：${availableTags.genres.slice(0, 80).join(', ')}
+可用乐器(instruments)：${availableTags.instruments.join(', ')}
+可用情绪(moods)：${availableTags.moods.slice(0, 60).join(', ')}
+可用主题(themes)：${availableTags.themes.slice(0, 60).join(', ')}
+
+返回 JSON，不要其他文字：
+{
+  "reply": "你的回复内容（告知暂时无法支持并推荐类似风格）",
+  "similarTags": {
+    "genres": ["从可用风格中选的标签，最多3个"],
+    "instruments": ["从可用乐器中选的标签，最多3个"],
+    "moods": ["从可用情绪中选的标签，最多3个"],
+    "themes": ["从可用主题中选的标签，最多3个"]
+  }
+}`;
+
+    try {
+      const cfg = getLLMConfig();
+      const response = await axios.post(
+        cfg.url,
+        {
+          model: cfg.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userInput },
+          ],
+          temperature: 0.3,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
+        },
+        { headers: cfg.headers }
+      );
+      const content = response.data.choices[0]?.message?.content || '{}';
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error('未解析到 JSON');
+      const parsed = JSON.parse(jsonMatch[0]);
+      const reply = typeof parsed.reply === 'string' ? parsed.reply.trim() : '暂时无法支持该需求，为你推荐了类似风格的歌曲～';
+      const raw = parsed.similarTags || {};
+      const filterToAvailable = (arr: unknown[], available: string[]): string[] =>
+        (Array.isArray(arr) ? arr : [])
+          .filter((t): t is string => typeof t === 'string' && available.includes(t))
+          .slice(0, 3);
+      const similarTags = {
+        genres: filterToAvailable(raw.genres || [], availableTags.genres),
+        instruments: filterToAvailable(raw.instruments || [], availableTags.instruments),
+        moods: filterToAvailable(raw.moods || [], availableTags.moods),
+        themes: filterToAvailable(raw.themes || [], availableTags.themes),
+      };
+      if (
+        similarTags.genres.length === 0 &&
+        similarTags.instruments.length === 0 &&
+        similarTags.moods.length === 0 &&
+        similarTags.themes.length === 0
+      ) {
+        similarTags.genres = availableTags.genres.slice(0, 2);
+      }
+      return { reply, similarTags };
+    } catch (error) {
+      console.error('getUnsupportedReplyWithSimilar failed:', error);
+      const fallbackSimilar = {
+        genres: availableTags.genres.slice(0, 2),
+        instruments: [] as string[],
+        moods: [] as string[],
+        themes: [] as string[],
+      };
+      return {
+        reply:
+          reason === 'year_filter'
+            ? '暂不支持按年份筛选歌曲哦，为你推荐了类似风格的歌～'
+            : '该风格/曲风暂不在曲库中，为你推荐了类似风格的歌曲～',
+        similarTags: fallbackSimilar,
+      };
+    }
+  },
+
   // 识别用户消息中的音乐偏好（喜欢或不喜欢）
   async extractPreferences(userMessage: string): Promise<{
     isDislike?: boolean;
@@ -416,6 +622,7 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
 规则：
 1. 若用户表达「喜欢」「想要」某类音乐，则 isDislike 为 false，将对应标签放入各数组。
 2. 若用户表达「不喜欢」「讨厌」「别推荐」「不要」某类音乐/风格/特征，则 isDislike 为 true，将用户不喜欢的风格或特征放入对应数组。
+3. **不要**将「人声」「有人声」「vocal」「非纯音乐」「带人声」等与人声/纯音乐相关的表述放入任何数组——曲库不按人声区分，这类需求无法作为偏好标签。若用户仅表达此类需求，各数组均返回空。
 
 用户消息：${userMessage}
 
@@ -431,6 +638,7 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
 未提及的类别返回空数组。只返回JSON，不要其他文字。`;
 
       const cfg = getLLMConfig();
+      // [场景：其它] 喜欢/不喜欢偏好 JSON，建议 1024（原 500 易被截断）
       const response = await axios.post(
         cfg.url,
         {
@@ -440,8 +648,8 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
             { role: 'user', content: userMessage },
           ],
           temperature: 0.3,
-          max_tokens: 500,
-          max_completion_tokens: 500,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         {
           headers: cfg.headers,
@@ -485,9 +693,9 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
       const sentiment = isLowRating ? '不喜欢' : '喜欢';
       
       const tags = trackInfo.tags || { genres: [], instruments: [], moods: [], themes: [] };
-      const genres = tags.genres.slice(0, 2).join('、') || '未知风格';
-      const instruments = tags.instruments.slice(0, 2).join('、') || '未知乐器';
-      const moods = tags.moods.slice(0, 2).join('、') || '未知情绪';
+      const genres = tags.genres.slice(0, 2).map(tagWithChinese).join('、') || '未知风格';
+      const instruments = tags.instruments.slice(0, 2).map(tagWithChinese).join('、') || '未知乐器';
+      const moods = tags.moods.slice(0, 2).map(tagWithChinese).join('、') || '未知情绪';
       
       const systemPrompt = `你是一个音乐推荐助手。用户刚刚对一首歌曲打了${rating}星（${ratingType}评分），你需要生成一段简短、易读、友好的反馈文本，表明你理解了用户的隐式偏好。
 
@@ -499,30 +707,32 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
 - 情绪标签：${moods}
 
 要求：
-1. 开头必须明确写出是根据用户「刚刚对这首歌的${rating}星评分」得出的理解，例如：「根据刚刚你的${rating}星评分，你似乎${sentiment}……」让用户清楚知道这是针对他/她刚才的评分行为。
-2. 文本稍丰富（约 60～100 字），信息量适中
-3. 语气友好、自然
+1. 开头必须明确写出刚刚的歌曲名称和用户对这首歌的${rating}星评分，例如：「你刚刚给了《${trackInfo.name}》${rating}星评分，你似乎${sentiment}……」让用户清楚知道这是针对他/她刚才的评分行为。文案中不要使用「根据」二字。
+2. 严格控制在 100 字以内；不要推理过程，只输出一段反馈文本。
+3. 语气友好、自然。
 4. ${isLowRating ? '表达理解用户不喜欢这些标签组合' : '表达理解用户喜欢这些标签组合'}
 5. 必须包含且突出两点：① 这首歌最有特色的地方（如编曲、层次、某段旋律、某种音色、节奏或氛围上的亮点，用一句话点出）；② 着重强调这首歌带给人的感觉、氛围或情绪（如沉静、克制、温暖、有张力、治愈、开阔等）
 6. 可自然带过适合聆听的情境（如专注、休息、放松时听）
-7. 只提及实际存在的标签；不要提及歌曲名称或艺术家名称
+7. 只提及实际存在的标签；开头必须带上歌曲名称《${trackInfo.name}》
+8. 文中若提到具体标签，请使用「英文 中文」格式，如 jazz 爵士、piano 钢琴。
 
-示例风格（仅供参考）：根据刚刚你的5星评分，你似乎很喜欢古典交响乐中钢琴与大提琴的搭配呢；这首在层次与张力上尤其出彩，整体给人沉静又略带克制的感动，适合专注或休息时听。
+示例风格（仅供参考）：你刚刚给了《${trackInfo.name}》5星评分，你似乎很喜欢古典交响乐中钢琴与大提琴的搭配呢；这首在层次与张力上尤其出彩，整体给人沉静又略带克制的感动，适合专注或休息时听。
 
-请生成反馈文本：`;
+请只输出反馈文本，不要推理过程：`;
 
       const cfg = getLLMConfig();
+      // [场景：评分反馈] 评分反馈文本（严格 100 字以内），上限 2048 避免截断
       const response = await axios.post(
         cfg.url,
         {
           model: cfg.model,
           messages: [
             { role: 'system', content: systemPrompt },
-            { role: 'user', content: '请生成反馈文本' },
+            { role: 'user', content: '请生成反馈文本（只输出一段话，100字以内）' },
           ],
           temperature: 0.7,
-          max_tokens: 1024,
-          max_completion_tokens: 1024,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         {
           headers: cfg.headers,
@@ -537,13 +747,14 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
     } catch (error: any) {
       console.error('生成评分反馈失败:', error);
       const tags = trackInfo.tags || { genres: [], instruments: [], moods: [], themes: [] };
-      const genres = tags.genres.slice(0, 2).join('、') || '未知风格';
-      const instruments = tags.instruments.slice(0, 2).join('、') || '未知乐器';
-      const moods = tags.moods.slice(0, 2).join('、') || '未知情绪';
+      const genres = tags.genres.slice(0, 2).map(tagWithChinese).join('、') || '未知风格';
+      const instruments = tags.instruments.slice(0, 2).map(tagWithChinese).join('、') || '未知乐器';
+      const moods = tags.moods.slice(0, 2).map(tagWithChinese).join('、') || '未知情绪';
+      const songName = trackInfo.name ? `《${trackInfo.name}》` : '这首歌';
       if (rating <= 2) {
-        return `根据刚刚你的${rating}星评分，你似乎很不喜欢该${genres}和器乐${instruments}在${moods}下为您营造的氛围哦`;
+        return `你刚刚给了${songName}${rating}星评分，你似乎很不喜欢该${genres}和器乐${instruments}在${moods}下为您营造的氛围哦`;
       } else if (rating >= 4) {
-        return `根据刚刚你的${rating}星评分，你似乎很喜欢该${genres}和器乐${instruments}的搭配呢；这首在编曲与层次上很有辨识度，整体给人放松又舒服的感觉，适合闲暇时听。`;
+        return `你刚刚给了${songName}${rating}星评分，你似乎很喜欢该${genres}和器乐${instruments}的搭配呢；这首在编曲与层次上很有辨识度，整体给人放松又舒服的感觉，适合闲暇时听。`;
       }
       return '';
     }
@@ -555,9 +766,9 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
   ): Promise<string> {
     try {
       const tags = trackInfo.tags || { genres: [], instruments: [], moods: [], themes: [] };
-      const genres = tags.genres.slice(0, 2).join('、') || '未知风格';
-      const instruments = tags.instruments.slice(0, 2).join('、') || '未知乐器';
-      const moods = tags.moods.slice(0, 2).join('、') || '未知情绪';
+      const genres = tags.genres.slice(0, 2).map(tagWithChinese).join('、') || '未知风格';
+      const instruments = tags.instruments.slice(0, 2).map(tagWithChinese).join('、') || '未知乐器';
+      const moods = tags.moods.slice(0, 2).map(tagWithChinese).join('、') || '未知情绪';
       
       const systemPrompt = `你是一个音乐推荐助手。用户刚刚听这首歌已经持续了1分钟，这表明用户可能喜欢这首歌曲。你需要生成一段简短、易读、友好的反馈文本，表明你理解了用户的隐式偏好。
 
@@ -569,17 +780,19 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
 - 情绪标签：${moods}
 
 要求：
-1. 开头必须明确写出是根据用户「刚刚听这首歌满1分钟」得出的推测，例如：「根据你刚刚听了约1分钟，你似乎很喜欢……」让用户清楚知道这是针对他/她刚才的听歌行为。
+1. 开头必须明确写出刚刚听的歌曲名称和听满1分钟的行为，例如：「你刚刚听了《${trackInfo.name}》约1分钟，你似乎很喜欢……」让用户清楚知道这是针对他/她刚才的听歌行为。文案中不要使用「根据」二字。
 2. 文本稍丰富（约 60～100 字）
 3. 语气友好、自然
 4. 必须包含且突出两点：① 这首歌最有特色的地方（如编曲、层次、音色、节奏或氛围上的亮点，一句话点出）；② 着重强调这首歌带给人的感觉、氛围或情绪
-5. 可自然带过适合聆听的情境；只提及实际存在的标签；不要提及歌曲名称或艺术家名称
+5. 可自然带过适合聆听的情境；只提及实际存在的标签；开头必须带上歌曲名称《${trackInfo.name}》
+6. 文中若提到具体标签，请使用「英文 中文」格式，如 jazz 爵士、piano 钢琴。
 
-示例风格（仅供参考）：根据你刚刚听了约1分钟，你似乎很喜欢古典交响乐中钢琴与大提琴的搭配呢；这首在层次与张力上尤其出彩，整体给人沉静又略带克制的感动，适合专注或休息时听。
+示例风格（仅供参考）：你刚刚听了《${trackInfo.name}》约1分钟，你似乎很喜欢古典交响乐中钢琴与大提琴的搭配呢；这首在层次与张力上尤其出彩，整体给人沉静又略带克制的感动，适合专注或休息时听。
 
 请生成反馈文本：`;
 
       const cfg = getLLMConfig();
+      // [场景：推荐解释] 听满 1 分钟反馈文本（约 60～100 字），建议 1024
       const response = await axios.post(
         cfg.url,
         {
@@ -589,8 +802,8 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
             { role: 'user', content: '请生成反馈文本' },
           ],
           temperature: 0.7,
-          max_tokens: 1024,
-          max_completion_tokens: 1024,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         {
           headers: cfg.headers,
@@ -605,10 +818,11 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
     } catch (error: any) {
       console.error('生成1分钟反馈失败:', error);
       const tags = trackInfo.tags || { genres: [], instruments: [], moods: [], themes: [] };
-      const genres = tags.genres.slice(0, 2).join('、') || '未知风格';
-      const instruments = tags.instruments.slice(0, 2).join('、') || '未知乐器';
-      const moods = tags.moods.slice(0, 2).join('、') || '未知情绪';
-      return `根据你刚刚听了约1分钟，你似乎很喜欢该${genres}和器乐${instruments}的搭配呢；这首在编曲与层次上很有辨识度，在${moods}下尤其有味道，整体给人很舒服的感觉。`;
+      const genres = tags.genres.slice(0, 2).map(tagWithChinese).join('、') || '未知风格';
+      const instruments = tags.instruments.slice(0, 2).map(tagWithChinese).join('、') || '未知乐器';
+      const moods = tags.moods.slice(0, 2).map(tagWithChinese).join('、') || '未知情绪';
+      const songName = trackInfo.name ? `《${trackInfo.name}》` : '这首歌';
+      return `你刚刚听了${songName}约1分钟，你似乎很喜欢该${genres}和器乐${instruments}的搭配呢；这首在编曲与层次上很有辨识度，在${moods}下尤其有味道，整体给人很舒服的感觉。`;
     }
   },
 
@@ -618,10 +832,10 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
   ): Promise<string> {
     try {
       const tags = trackInfo.tags || { genres: [], instruments: [], moods: [], themes: [] };
-      const genres = tags.genres.slice(0, 2).join('、') || '未知风格';
-      const instruments = tags.instruments.slice(0, 2).join('、') || '未知乐器';
-      const moods = tags.moods.slice(0, 2).join('、') || '未知情绪';
-      const themes = tags.themes.slice(0, 2).join('、') || '未知主题';
+      const genres = tags.genres.slice(0, 2).map(tagWithChinese).join('、') || '未知风格';
+      const instruments = tags.instruments.slice(0, 2).map(tagWithChinese).join('、') || '未知乐器';
+      const moods = tags.moods.slice(0, 2).map(tagWithChinese).join('、') || '未知情绪';
+      const themes = tags.themes.slice(0, 2).map(tagWithChinese).join('、') || '未知主题';
       
       const systemPrompt = `你是一个音乐推荐助手。用户刚刚快听完这首歌曲（播放进度约95%），这表明用户可能非常喜欢这首歌曲。但该歌曲的标签不在用户已知的偏好中。你需要生成一段简短、易读、友好的反馈文本，推测用户可能喜欢这些标签组合。
 
@@ -634,18 +848,20 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
 - 主题标签：${themes}
 
 要求：
-1. 开头必须明确写出是根据用户「刚刚快听完这首歌（约95%进度）」得出的推测，例如：「根据你刚刚快听完了这首歌，我推测你非常喜欢……」让用户清楚知道这是针对他/她刚才的听歌行为。
+1. 开头必须明确写出刚刚快听完的歌曲名称（约95%进度），例如：「你刚刚快听完了《${trackInfo.name}》，我推测你非常喜欢……」让用户清楚知道这是针对他/她刚才的听歌行为。文案中不要使用「根据」二字。
 2. 文本稍丰富（约 60～90 字），可略长于一句
 3. 语气友好、自然、带有推测性
 4. 必须包含且突出：① 这首歌最有特色的地方（如编曲、层次、音色等，一句话点出）；② 着重强调这首歌带给人的感觉、氛围或情绪
-5. 只提及实际存在的标签；不要提及歌曲名称或艺术家名称
+5. 只提及实际存在的标签；开头必须带上歌曲名称《${trackInfo.name}》
 6. 最后加上"来聊聊我说的对不对？"
+7. 文中若提到具体标签，请使用「英文 中文」格式，如 jazz 爵士、piano 钢琴。
 
-示例格式（仅供参考）：根据你刚刚快听完了这首歌，我推测你非常喜欢这首在层次与张力上尤其出彩的古典搭配呢，整体给人沉静又克制的感动；来聊聊我说的对不对？
+示例格式（仅供参考）：你刚刚快听完了《${trackInfo.name}》，我推测你非常喜欢这首在层次与张力上尤其出彩的古典搭配呢，整体给人沉静又克制的感动；来聊聊我说的对不对？
 
 请生成反馈文本：`;
 
       const cfg = getLLMConfig();
+      // [场景：推荐解释] 95% 进度反馈文本（约 60～90 字），建议 1024
       const response = await axios.post(
         cfg.url,
         {
@@ -655,8 +871,8 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
             { role: 'user', content: '请生成反馈文本' },
           ],
           temperature: 0.7,
-          max_tokens: 1024,
-          max_completion_tokens: 1024,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         {
           headers: cfg.headers,
@@ -672,11 +888,12 @@ ${currentTrack?.tags ? `歌曲标签：风格-${currentTrack.tags.genres.join(',
       console.error('生成95%反馈失败:', error);
       // 如果LLM调用失败，返回默认文本
       const tags = trackInfo.tags || { genres: [], instruments: [], moods: [], themes: [] };
-      const genres = tags.genres.slice(0, 2).join('、') || '未知风格';
-      const instruments = tags.instruments.slice(0, 2).join('、') || '未知乐器';
-      const moods = tags.moods.slice(0, 2).join('、') || '未知情绪';
+      const genres = tags.genres.slice(0, 2).map(tagWithChinese).join('、') || '未知风格';
+      const instruments = tags.instruments.slice(0, 2).map(tagWithChinese).join('、') || '未知乐器';
+      const moods = tags.moods.slice(0, 2).map(tagWithChinese).join('、') || '未知情绪';
       
-      return `根据你刚刚快听完了这首歌，我推测你非常喜欢该${genres}和器乐${instruments}在${moods}下为您营造的氛围，来聊聊我说的对不对？`;
+      const songName = trackInfo.name ? `《${trackInfo.name}》` : '这首歌';
+      return `你刚刚快听完了${songName}，我推测你非常喜欢该${genres}和器乐${instruments}在${moods}下为您营造的氛围，来聊聊我说的对不对？`;
     }
   },
 
@@ -721,8 +938,8 @@ ${SONG_DESCRIPTION_LAYERS}
             { role: 'user', content: '请生成优美的描述' },
           ],
           temperature: 0.8,
-          max_tokens: 512,
-          max_completion_tokens: 512,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         {
           headers: cfg.headers,
@@ -749,10 +966,10 @@ ${SONG_DESCRIPTION_LAYERS}
     try {
       // 构建历史偏好描述
       const historyDescription = `当前用户偏好：
-- 风格：${currentPreferences.genres.join('、') || '无'}
-- 乐器：${currentPreferences.instruments.join('、') || '无'}
-- 情绪：${currentPreferences.moods.join('、') || '无'}
-- 主题：${currentPreferences.themes.join('、') || '无'}`;
+- 风格：${(currentPreferences.genres || []).map(tagWithChinese).join('、') || '无'}
+- 乐器：${(currentPreferences.instruments || []).map(tagWithChinese).join('、') || '无'}
+- 情绪：${(currentPreferences.moods || []).map(tagWithChinese).join('、') || '无'}
+- 主题：${(currentPreferences.themes || []).map(tagWithChinese).join('、') || '无'}`;
 
       // 构建聊天历史摘要（最近5条消息）
       const recentHistory = chatHistory.slice(-5).map(msg => 
@@ -791,6 +1008,7 @@ ${recentHistory}
 }`;
 
       const cfg = getLLMConfig();
+      // [场景：其它] 偏好冲突分析 JSON，建议 1024
       const response = await axios.post(
         cfg.url,
         {
@@ -800,8 +1018,8 @@ ${recentHistory}
             { role: 'user', content: '请分析偏好冲突' },
           ],
           temperature: 0.3,
-          max_tokens: 1024,
-          max_completion_tokens: 1024,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         {
           headers: cfg.headers,
@@ -828,7 +1046,7 @@ ${recentHistory}
     }
   },
 
-  // 生成偏好热力图解释
+  // 生成「系统眼中的你」偏好解释（基于 treemap/偏好数据）
   async generateHeatmapExplanation(heatmapData: {
     genres: Array<{ tag: string; weight: number }>;
     instruments: Array<{ tag: string; weight: number }>;
@@ -836,19 +1054,19 @@ ${recentHistory}
     themes: Array<{ tag: string; weight: number }>;
   }): Promise<string> {
     try {
-      // 构建热力图数据摘要
-      const topGenres = heatmapData.genres.slice(0, 5).map(item => `${item.tag}(${item.weight > 0 ? '+' : ''}${item.weight.toFixed(1)})`).join('、') || '无';
-      const topInstruments = heatmapData.instruments.slice(0, 5).map(item => `${item.tag}(${item.weight > 0 ? '+' : ''}${item.weight.toFixed(1)})`).join('、') || '无';
-      const topMoods = heatmapData.moods.slice(0, 5).map(item => `${item.tag}(${item.weight > 0 ? '+' : ''}${item.weight.toFixed(1)})`).join('、') || '无';
-      const topThemes = heatmapData.themes.slice(0, 5).map(item => `${item.tag}(${item.weight > 0 ? '+' : ''}${item.weight.toFixed(1)})`).join('、') || '无';
+      // 构建偏好数据摘要供 LLM 使用（标签用中英文展示，如 jazz 爵士）
+      const topGenres = heatmapData.genres.slice(0, 5).map(item => `${tagWithChinese(item.tag)}(${item.weight > 0 ? '+' : ''}${item.weight.toFixed(1)})`).join('、') || '无';
+      const topInstruments = heatmapData.instruments.slice(0, 5).map(item => `${tagWithChinese(item.tag)}(${item.weight > 0 ? '+' : ''}${item.weight.toFixed(1)})`).join('、') || '无';
+      const topMoods = heatmapData.moods.slice(0, 5).map(item => `${tagWithChinese(item.tag)}(${item.weight > 0 ? '+' : ''}${item.weight.toFixed(1)})`).join('、') || '无';
+      const topThemes = heatmapData.themes.slice(0, 5).map(item => `${tagWithChinese(item.tag)}(${item.weight > 0 ? '+' : ''}${item.weight.toFixed(1)})`).join('、') || '无';
       
-      const systemPrompt = `你是一个音乐偏好分析助手。用户查看了他们的听歌偏好热力图，你需要根据热力图数据生成一段简洁、优美、易懂的解释，说明用户的音乐偏好特点，以及这些偏好如何影响推荐结果。
+      const systemPrompt = `你是一个音乐偏好分析助手。用户查看了以树状图（treemap）形式展示的听歌偏好分布，你需要根据以下偏好数据生成一段简洁、优美、易懂的解释，说明用户的音乐偏好特点，以及这些偏好如何影响推荐结果。
 
-热力图数据：
-- 风格偏好（权重从高到低）：${topGenres}
-- 乐器偏好（权重从高到低）：${topInstruments}
-- 情绪偏好（权重从高到低）：${topMoods}
-- 主题偏好（权重从高到低）：${topThemes}
+偏好数据（权重从高到低）：
+- 风格偏好：${topGenres}
+- 乐器偏好：${topInstruments}
+- 情绪偏好：${topMoods}
+- 主题偏好：${topThemes}
 
 权重说明：
 - 正数表示偏好，数值越大偏好程度越高
@@ -860,27 +1078,27 @@ ${recentHistory}
 3. 简要说明这些偏好如何影响推荐（不必展开算法细节）
 4. 长度控制在80-120字
 5. 使用"你"来称呼用户，语气温暖、专业
-
-请生成解释文本：`;
+6. 描述可视化时请用「偏好分布」「树状图」「图中的偏好」等表述
+7. 文中若提到具体标签，请使用「英文 中文」格式，如 jazz 爵士、piano 钢琴。`;
 
       const cfg = getLLMConfig();
-      /** GPT-4o 等模型响应较慢，给足时间避免超时导致「生成不了」 */
-      const HEATMAP_EXPLANATION_TIMEOUT_MS = 70000;
+      /** 偏好解释（80-120 字），GPT-4o 等响应较慢，给足时间避免超时 */
+      const PREFERENCE_EXPLANATION_TIMEOUT_MS = 70000;
       const response = await axios.post(
         cfg.url,
         {
           model: cfg.model,
           messages: [
             { role: 'system', content: systemPrompt },
-            { role: 'user', content: '请生成偏好热力图解释' },
+            { role: 'user', content: '请根据以上偏好数据生成解释文本' },
           ],
           temperature: 0.7,
-          max_tokens: 1024,
-          max_completion_tokens: 1024,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         {
           headers: cfg.headers,
-          timeout: HEATMAP_EXPLANATION_TIMEOUT_MS,
+          timeout: PREFERENCE_EXPLANATION_TIMEOUT_MS,
         }
       );
 
@@ -890,7 +1108,7 @@ ${recentHistory}
       appendSystemLog(`[LLM] 本次调用模型: ${cfg.model}`);
       return getChoiceContent(response.data.choices[0], '根据您的听歌历史，系统已经学习到了您的音乐偏好，并会根据这些偏好为您推荐合适的歌曲。');
     } catch (error: any) {
-      console.error('生成偏好热力图解释失败:', error);
+      console.error('生成偏好解释失败:', error);
       return '根据您的听歌历史，系统已经学习到了您的音乐偏好，并会根据这些偏好为您推荐合适的歌曲。';
     }
   },
@@ -909,17 +1127,17 @@ ${recentHistory}
     isColdStart?: boolean
   ): Promise<string> {
     try {
-      const matchedGenres = whyData.matchedTags.genres.join('、') || '无';
-      const matchedInstruments = whyData.matchedTags.instruments.join('、') || '无';
-      const matchedMoods = whyData.matchedTags.moods.join('、') || '无';
-      const matchedThemes = whyData.matchedTags.themes.join('、') || '无';
-      const trackGenres = whyData.trackTags.genres.join('、') || '无';
-      const trackInstruments = whyData.trackTags.instruments.join('、') || '无';
-      const trackMoods = whyData.trackTags.moods.join('、') || '无';
-      const trackThemes = whyData.trackTags.themes.join('、') || '无';
+      const matchedGenres = whyData.matchedTags.genres.map(tagWithChinese).join('、') || '无';
+      const matchedInstruments = whyData.matchedTags.instruments.map(tagWithChinese).join('、') || '无';
+      const matchedMoods = whyData.matchedTags.moods.map(tagWithChinese).join('、') || '无';
+      const matchedThemes = whyData.matchedTags.themes.map(tagWithChinese).join('、') || '无';
+      const trackGenres = whyData.trackTags.genres.map(tagWithChinese).join('、') || '无';
+      const trackInstruments = whyData.trackTags.instruments.map(tagWithChinese).join('、') || '无';
+      const trackMoods = whyData.trackTags.moods.map(tagWithChinese).join('、') || '无';
+      const trackThemes = whyData.trackTags.themes.map(tagWithChinese).join('、') || '无';
 
-      const coldStartHint = isColdStart ? '这是用户冷启动后第一首推荐（系统 B），请用热情、简洁、优美的语言描述推荐理由，让用户感到被懂、被欢迎。控制在 2-4 句话、80-120 字，语气热情、简洁、优美。' : '';
-      const systemPrompt = `你是一个音乐推荐助手。用户想知道「为什么系统推荐了这首《${trackName}》- ${artistName}」。请根据推荐算法的评分数据，用简洁、优美的语言（2-4句话，约80-120字）描述推荐理由。${coldStartHint ? '\n\n' + coldStartHint : ''}
+      const coldStartHint = isColdStart ? '这是用户冷启动后第一首推荐（系统 B），请用热情、简洁、优美的语言描述推荐理由，让用户感到被懂、被欢迎。控制在约50字，语气热情、简洁、优美。' : '';
+      const systemPrompt = `你是一个音乐推荐助手。用户想知道「为什么系统推荐了这首《${trackName}》- ${artistName}」。请根据推荐算法的评分数据，用简洁、优美的语言描述推荐理由，严格控制在约50字。${coldStartHint ? '\n\n' + coldStartHint : ''}
 
 推荐算法数据：
 - 内容匹配分数（与用户偏好标签的匹配度，权重60%）：${whyData.contentScore.toFixed(3)}
@@ -932,9 +1150,10 @@ ${recentHistory}
 
 ${SONG_DESCRIPTION_LAYERS}
 
-要求：在解释「为什么这首适合你」时，可从声学层、情绪层、情境层自然带出这首歌的听感与适用场景；语气温暖、自然，不要罗列数字，不要超过120字。只返回解释文字。`;
+要求：在解释「为什么这首适合你」时，可从声学层、情绪层、情境层自然带出这首歌的听感与适用场景；语气温暖、自然，不要罗列数字，严格控制在约50字。**描述中必须明确写出歌曲名《${trackName}》，例如开头写「《${trackName}》这首歌…」或文中自然带出歌名。** 文中若提到具体标签，请使用「英文 中文」格式，如 jazz 爵士、piano 钢琴。只返回解释文字。`;
 
       const cfg = getLLMConfig();
+      // [场景：推荐解释] 为什么推荐这首（约 50 字），建议 256
       const response = await axios.post(
         cfg.url,
         {
@@ -944,8 +1163,8 @@ ${SONG_DESCRIPTION_LAYERS}
             { role: 'user', content: '请描述为什么推荐这首《' + trackName + '》' },
           ],
           temperature: 0.7,
-          max_tokens: 1024,
-          max_completion_tokens: 1024,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         {
           headers: cfg.headers,
@@ -962,9 +1181,6 @@ ${SONG_DESCRIPTION_LAYERS}
       const cfg = getLLMConfig();
       const errMsg = error?.response?.data?.error?.message ?? error?.message ?? String(error);
       const status = error?.response?.status;
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'aiAssistant.ts:generateWhyThisTrack catch', message: 'OpenRouter LLM error', data: { status, errMsgSnippet: String(errMsg).slice(0, 80), keyLength: OPENROUTER_API_KEY.length, keyEmpty: OPENROUTER_API_KEY.length === 0 }, timestamp: Date.now(), hypothesisId: 'H1-H5' }) }).catch(() => {});
-      // #endregion
       const hint = openRouterErrorHint(errMsg, status);
       return `【LLM 调用失败】模型: ${cfg.model}，错误: ${errMsg}${hint}`;
     }
@@ -983,10 +1199,10 @@ ${SONG_DESCRIPTION_LAYERS}
     artistName: string
   ): Promise<string> {
     try {
-      const trackMoods = whyData.trackTags.moods.join('、') || '无';
-      const trackThemes = whyData.trackTags.themes.join('、') || '无';
-      const trackGenres = whyData.trackTags.genres.join('、') || '无';
-      const trackInstruments = whyData.trackTags.instruments.join('、') || '无';
+      const trackMoods = whyData.trackTags.moods.map(tagWithChinese).join('、') || '无';
+      const trackThemes = whyData.trackTags.themes.map(tagWithChinese).join('、') || '无';
+      const trackGenres = whyData.trackTags.genres.map(tagWithChinese).join('、') || '无';
+      const trackInstruments = whyData.trackTags.instruments.map(tagWithChinese).join('、') || '无';
 
       const systemPrompt = `你是一个音乐推荐助手。请用 1～2 句话（约 40～80 字）描述这首《${trackName}》- ${artistName} 带给人的感觉。
 
@@ -994,9 +1210,10 @@ ${SONG_DESCRIPTION_LAYERS}
 
 ${SONG_DESCRIPTION_LAYERS}
 
-要求：将声学层、情绪层、情境层自然融合成一段话，语气温暖、有画面感，不要罗列数字或算法术语。只返回这段描述。`;
+要求：将声学层、情绪层、情境层自然融合成一段话，语气温暖、有画面感，不要罗列数字或算法术语。文中若提到具体标签，请使用「英文 中文」格式，如 jazz 爵士。只返回这段描述。`;
 
       const cfg = getLLMConfig();
+      // [场景：推荐解释] 这首歌带给人的感觉（40～80 字），建议 1024
       const response = await axios.post(
         cfg.url,
         {
@@ -1006,8 +1223,8 @@ ${SONG_DESCRIPTION_LAYERS}
             { role: 'user', content: '请描述这首歌带给人的感觉' },
           ],
           temperature: 0.7,
-          max_tokens: 1024,
-          max_completion_tokens: 1024,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         {
           headers: cfg.headers,
@@ -1023,6 +1240,99 @@ ${SONG_DESCRIPTION_LAYERS}
     }
   },
 
+  /** 这首歌的感觉 → 精炼关键词（用于进度条气泡），有算法数据时 */
+  async generateWhyThisTrackKeywords(
+    whyData: {
+      contentScore: number;
+      behaviorScore: number;
+      finalScore: number;
+      matchedTags: { genres: string[]; instruments: string[]; moods: string[]; themes: string[] };
+      trackTags: { genres: string[]; instruments: string[]; moods: string[]; themes: string[] };
+    },
+    _trackName: string,
+    _artistName: string
+  ): Promise<string> {
+    try {
+      const trackMoods = whyData.trackTags.moods.map(tagWithChinese).join('、') || '无';
+      const trackThemes = whyData.trackTags.themes.map(tagWithChinese).join('、') || '无';
+      const trackGenres = whyData.trackTags.genres.map(tagWithChinese).join('、') || '无';
+      const trackInstruments = whyData.trackTags.instruments.map(tagWithChinese).join('、') || '无';
+      const systemPrompt = `你是一个音乐推荐助手。请将这首歌带给人的感觉提炼为最多 3 个精炼中文关键词（可从声学、情绪、情境等维度选取）。
+
+这首歌的标签：风格 ${trackGenres}；乐器 ${trackInstruments}；情绪/氛围 ${trackMoods}；主题 ${trackThemes}。
+
+要求：只输出一行关键词，用 · 连接，最多 3 个，不要句子、不要解释、不要数字。例如：氛围感·层次·沉静`;
+      const cfg = getLLMConfig();
+      const response = await axios.post(
+        cfg.url,
+        {
+          model: cfg.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: '请输出最多 3 个关键词，用 · 连接' },
+          ],
+          temperature: 0.5,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
+        },
+        { headers: cfg.headers }
+      );
+      if (!response.data?.choices?.length) throw new Error('无效响应');
+      appendSystemLog(`[LLM] 本次调用模型: ${cfg.model}`);
+      const raw = getChoiceContent(response.data.choices[0], '氛围感·层次·沉静');
+      const normalized = raw.replace(/\s*[，,、]\s*/g, '·').replace(/\s+/g, '·').replace(/·+/g, '·').replace(/^·|·$/g, '').trim() || '氛围感·层次·沉静';
+      const keywords = normalized.split('·').filter(Boolean).slice(0, 3);
+      return keywords.length ? keywords.join('·') : '氛围感·层次·沉静';
+    } catch (e) {
+      console.warn('生成「这首歌的感觉」关键词失败:', e);
+      const g = (whyData.trackTags.genres || [])[0];
+      const m = (whyData.trackTags.moods || [])[0];
+      return [g ? tagWithChinese(g) : '氛围', m ? tagWithChinese(m) : '沉静', '层次'].join('·');
+    }
+  },
+
+  /** 这首歌的感觉 → 精炼关键词（用于进度条气泡），无算法数据时兜底 */
+  async generateWhyThisTrackFallbackKeywords(
+    _trackName: string,
+    _artistName: string,
+    trackTags?: { genres?: string[]; instruments?: string[]; moods?: string[]; themes?: string[] } | null
+  ): Promise<string> {
+    try {
+      const tagStr = trackTags
+        ? `风格 ${(trackTags.genres || []).map(tagWithChinese).join('、') || '无'}；乐器 ${(trackTags.instruments || []).map(tagWithChinese).join('、') || '无'}；情绪/氛围 ${(trackTags.moods || []).map(tagWithChinese).join('、') || '无'}；主题 ${(trackTags.themes || []).map(tagWithChinese).join('、') || '无'}。`
+        : '';
+      const systemPrompt = `你是一个音乐推荐助手。请将这首歌带给人的感觉提炼为最多 3 个精炼中文关键词。${tagStr ? `\n这首歌的标签：${tagStr}\n` : ''}
+
+要求：只输出一行关键词，用 · 连接，最多 3 个，不要句子、不要解释。例如：氛围感·层次·沉静`;
+      const cfg = getLLMConfig();
+      const response = await axios.post(
+        cfg.url,
+        {
+          model: cfg.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: '请输出最多 3 个关键词，用 · 连接' },
+          ],
+          temperature: 0.5,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
+        },
+        { headers: cfg.headers }
+      );
+      if (!response.data?.choices?.length) throw new Error('无效响应');
+      appendSystemLog(`[LLM] 本次调用模型: ${cfg.model}`);
+      const raw = getChoiceContent(response.data.choices[0], '氛围感·层次·沉静');
+      const normalized = raw.replace(/\s*[，,、]\s*/g, '·').replace(/\s+/g, '·').replace(/·+/g, '·').replace(/^·|·$/g, '').trim() || '氛围感·层次·沉静';
+      const keywords = normalized.split('·').filter(Boolean).slice(0, 3);
+      return keywords.length ? keywords.join('·') : '氛围感·层次·沉静';
+    } catch (e) {
+      console.warn('生成「这首歌的感觉」关键词兜底失败:', e);
+      const g = (trackTags?.genres || [])[0];
+      const m = (trackTags?.moods || [])[0];
+      return [g ? tagWithChinese(g) : '氛围', m ? tagWithChinese(m) : '沉静', '层次'].join('·');
+    }
+  },
+
   /** 无算法数据时：仅根据歌名、歌手和标签生成「这首歌带给人的感觉」描述，用于气泡 */
   async generateWhyThisTrackFallbackEmphasizeFeeling(
     trackName: string,
@@ -1031,7 +1341,7 @@ ${SONG_DESCRIPTION_LAYERS}
   ): Promise<string> {
     try {
       const tagStr = trackTags
-        ? `风格 ${(trackTags.genres || []).join('、') || '无'}；乐器 ${(trackTags.instruments || []).join('、') || '无'}；情绪/氛围 ${(trackTags.moods || []).join('、') || '无'}；主题 ${(trackTags.themes || []).join('、') || '无'}。`
+        ? `风格 ${(trackTags.genres || []).map(tagWithChinese).join('、') || '无'}；乐器 ${(trackTags.instruments || []).map(tagWithChinese).join('、') || '无'}；情绪/氛围 ${(trackTags.moods || []).map(tagWithChinese).join('、') || '无'}；主题 ${(trackTags.themes || []).map(tagWithChinese).join('、') || '无'}。`
         : '';
       const systemPrompt = `你是一个音乐推荐助手。请用 1～2 句话（约 40～80 字）描述这首《${trackName}》- ${artistName} 带给人的感觉。${tagStr ? `\n这首歌的标签：${tagStr}\n` : ''}
 
@@ -1039,6 +1349,7 @@ ${SONG_DESCRIPTION_LAYERS}
 
 要求：将声学层、情绪层、情境层自然融合成一段话，语气温暖、有画面感。只返回这段描述。`;
       const cfg = getLLMConfig();
+      // [场景：推荐解释] 无算法数据时「这首歌带给人的感觉」兜底，建议 1024
       const response = await axios.post(
         cfg.url,
         {
@@ -1048,8 +1359,8 @@ ${SONG_DESCRIPTION_LAYERS}
             { role: 'user', content: '请描述这首歌带给人的感觉' },
           ],
           temperature: 0.7,
-          max_tokens: 1024,
-          max_completion_tokens: 1024,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         {
           headers: cfg.headers,
@@ -1072,10 +1383,11 @@ ${SONG_DESCRIPTION_LAYERS}
   ): Promise<string> {
     try {
       const tagStr = trackTags
-        ? `标签：风格 ${(trackTags.genres || []).join('、') || '无'}；乐器 ${(trackTags.instruments || []).join('、') || '无'}；情绪 ${(trackTags.moods || []).join('、') || '无'}；主题 ${(trackTags.themes || []).join('、') || '无'}。`
+        ? `标签：风格 ${(trackTags.genres || []).map(tagWithChinese).join('、') || '无'}；乐器 ${(trackTags.instruments || []).map(tagWithChinese).join('、') || '无'}；情绪 ${(trackTags.moods || []).map(tagWithChinese).join('、') || '无'}；主题 ${(trackTags.themes || []).map(tagWithChinese).join('、') || '无'}。`
         : '';
-      const systemPrompt = `你是一个音乐推荐助手。用户想知道「为什么系统可能推荐了这首《${trackName}》- ${artistName}」。${tagStr ? `\n${tagStr}\n` : ''}请用一句简洁、温暖的话（30-60字）描述可能推荐这首的理由，不要编造具体数据。只返回这一句话。`;
+      const systemPrompt = `你是一个音乐推荐助手。用户想知道「为什么系统可能推荐了这首《${trackName}》- ${artistName}」。${tagStr ? `\n${tagStr}\n` : ''}请用一句简洁、温暖的话（约50字）描述可能推荐这首的理由，不要编造具体数据。**描述中必须写出歌曲名《${trackName}》，例如「《${trackName}》这首歌…」。** 文中若提到具体标签，请使用「英文 中文」格式，如 jazz 爵士。只返回这一句话。`;
       const cfg = getLLMConfig();
+      // [场景：推荐解释] 无算法数据时一句推荐理由兜底，建议 1024
       const response = await axios.post(
         cfg.url,
         {
@@ -1085,8 +1397,8 @@ ${SONG_DESCRIPTION_LAYERS}
             { role: 'user', content: '请用一句话说明为什么可能推荐这首《' + trackName + '》' },
           ],
           temperature: 0.7,
-          max_tokens: 1024,
-          max_completion_tokens: 1024,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         {
           headers: cfg.headers,
@@ -1100,30 +1412,28 @@ ${SONG_DESCRIPTION_LAYERS}
       const cfg = getLLMConfig();
       const errMsg = e?.response?.data?.error?.message ?? e?.message ?? String(e);
       const status = e?.response?.status;
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/9e395332-8d6d-48d4-bf70-0af1889bd542', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ location: 'aiAssistant.ts:generateWhyThisTrackFallback catch', message: 'OpenRouter LLM error', data: { status, errMsgSnippet: String(errMsg).slice(0, 80), keyLength: OPENROUTER_API_KEY.length, keyEmpty: OPENROUTER_API_KEY.length === 0 }, timestamp: Date.now(), hypothesisId: 'H1-H5' }) }).catch(() => {});
-      // #endregion
       const hint = openRouterErrorHint(errMsg, status);
       return `【LLM 调用失败】模型: ${cfg.model}，错误: ${errMsg}${hint}`;
     }
   },
 
-  // 生成多样性推荐介绍
+  // 生成多样性推荐介绍：简洁说明这是多样性推荐、目的、这首歌与之前不同
   async generateDiversityIntroduction(trackInfo: TrackInfo): Promise<string> {
+    const fallback = `【多样性推荐】为了拓宽你的听歌范围，这次推荐了一首与之前风格不同的歌《${trackInfo.name}》，希望带给你新鲜感。`;
     try {
-      const systemPrompt = `你是一个音乐推荐助手。用户已经连续听了20首歌，现在系统推荐了一首用户没有表达过厌恶，但也没有展示过喜爱的tag的歌，以提供推荐的多样性。
+      const systemPrompt = `你是一个音乐推荐助手。用户已连续听了多首推荐歌，系统做了一次**多样性推荐**：选了一首用户没表达过厌恶、但也没展示过喜爱的风格的歌，**目的是拓宽听歌范围、让你尝试新风格**。这首歌与用户之前听的不一样。
 
 歌曲信息：
 - 名称：${trackInfo.name}
 - 艺术家：${trackInfo.artist}
-- 标签：
-  - 风格：${trackInfo.tags?.genres?.join('、') || '无'}
-  - 乐器：${trackInfo.tags?.instruments?.join('、') || '无'}
-  - 情绪：${trackInfo.tags?.moods?.join('、') || '无'}
-  - 主题：${trackInfo.tags?.themes?.join('、') || '无'}
+- 标签：风格 ${(trackInfo.tags?.genres || []).map(tagWithChinese).join('、') || '无'}；乐器 ${(trackInfo.tags?.instruments || []).map(tagWithChinese).join('、') || '无'}；情绪 ${(trackInfo.tags?.moods || []).map(tagWithChinese).join('、') || '无'}；主题 ${(trackInfo.tags?.themes || []).map(tagWithChinese).join('、') || '无'}
 
-请用简洁优美易读的语言（不超过50字）介绍这首歌和推荐多样性的目的。语言要自然、友好，不要显得生硬。例如："为你推荐这首《歌曲名》，它有着独特的风格，希望为你带来不一样的音乐体验。"
+请用简洁、易读的一句话（不超过 60 字）写「根据**」式介绍，必须包含三点：
+1. 点明这是**多样性推荐**（文案中必须出现「多样性」二字，建议以「【多样性推荐】」开头）。
+2. 简短说明**目的**（如：拓宽听歌范围 / 让你尝试新风格）。
+3. 说明**这首歌与之前听的不一样**（风格不同 / 换换口味等）。
 
+示例："【多样性推荐】根据「拓宽听歌范围」做的推荐，这首《xxx》与之前听的风格不同，希望带给你新鲜感。"
 只返回介绍文字，不要其他内容。`;
 
       const cfg = getLLMConfig();
@@ -1136,22 +1446,21 @@ ${SONG_DESCRIPTION_LAYERS}
             { role: 'user', content: '请生成多样性推荐介绍' },
           ],
           temperature: 0.7,
-          max_tokens: 1024,
-          max_completion_tokens: 1024,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
-        {
-          headers: cfg.headers,
-        }
+        { headers: cfg.headers }
       );
 
-      if (!response.data || !response.data.choices || response.data.choices.length === 0) {
-        throw new Error('AI助手返回了无效的响应');
-      }
+      if (!response.data?.choices?.length) throw new Error('AI助手返回了无效的响应');
       appendSystemLog(`[LLM] 本次调用模型: ${cfg.model}`);
-      return getChoiceContent(response.data.choices[0], `为你推荐这首《${trackInfo.name}》，它有着独特的风格，希望为你带来不一样的音乐体验。`);
+      const raw = getChoiceContent(response.data.choices[0], fallback);
+      const trimmed = (raw || '').trim();
+      if (trimmed && !trimmed.includes('多样性')) return `【多样性推荐】${trimmed}`;
+      return trimmed || fallback;
     } catch (error: any) {
       console.error('生成多样性推荐介绍失败:', error);
-      return `为你推荐这首《${trackInfo.name}》，它有着独特的风格，希望为你带来不一样的音乐体验。`;
+      return fallback;
     }
   },
 
@@ -1181,6 +1490,7 @@ ${SONG_DESCRIPTION_LAYERS}
 ${truncated}`;
 
       const cfg = getLLMConfig();
+      // [场景：其它] 根据算法文档生成回答（推荐原理/怎么推荐等），建议 1024
       const response = await axios.post(
         cfg.url,
         {
@@ -1190,8 +1500,8 @@ ${truncated}`;
             { role: 'user', content: userQuestion },
           ],
           temperature: 0.5,
-          max_tokens: 1024,
-          max_completion_tokens: 1024,
+          max_tokens: cfg.maxTokens,
+          max_completion_tokens: cfg.maxTokens,
         },
         {
           headers: cfg.headers,

@@ -129,8 +129,54 @@ async function initDatabase() {
     )
   `);
 
-  // 插入初始用户数据
+  // 系统眼中的你：每次用户请求时的请求时间、返回文字、treemap tag 与权重
+  db.run(`
+    CREATE TABLE IF NOT EXISTS user_system_eyes_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL,
+      system_type TEXT NOT NULL DEFAULT 'A',
+      requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      requested_at_timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+      explanation_text TEXT,
+      treemap_data TEXT
+    )
+  `);
+
+  // 「为什么推荐这首」按钮点击记录：时间、用户名、点击后系统返回的解释消息
+  db.run(`
+    CREATE TABLE IF NOT EXISTS why_this_track_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at DATETIME DEFAULT (datetime('now', '+8 hours')),
+      created_at_timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+      username TEXT NOT NULL,
+      track_id TEXT,
+      track_name TEXT,
+      explanation TEXT NOT NULL
+    )
+  `);
+
+  // 插入初始用户数据（user1～user10 与 user11～user20）
   const initialUsers = [
+    { username: 'user1', password: '12' },
+    { username: 'user2', password: '24' },
+    { username: 'user3', password: '36' },
+    { username: 'user4', password: '48' },
+    { username: 'user5', password: '510' },
+    { username: 'user6', password: '612' },
+    { username: 'user7', password: '714' },
+    { username: 'user8', password: '816' },
+    { username: 'user9', password: '918' },
+    { username: 'user10', password: '1020' },
+    { username: 'user1_LLM', password: '12' },
+    { username: 'user2_LLM', password: '24' },
+    { username: 'user3_LLM', password: '36' },
+    { username: 'user4_LLM', password: '48' },
+    { username: 'user5_LLM', password: '510' },
+    { username: 'user6_LLM', password: '612' },
+    { username: 'user7_LLM', password: '714' },
+    { username: 'user8_LLM', password: '816' },
+    { username: 'user9_LLM', password: '918' },
+    { username: 'user10_LLM', password: '1020' },
     { username: 'user11', password: '1122' },
     { username: 'user11_LLM', password: '1122' },
     { username: 'user12', password: '1224' },

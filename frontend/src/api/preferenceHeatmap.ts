@@ -1,6 +1,6 @@
-// 偏好热力图API
+// 偏好数据 API（用于「系统眼中的你」treemap 展示）
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:3000';
+import { API_BASE_URL } from './baseUrl';
 
 export interface TagWeight {
   tag: string;
@@ -25,19 +25,19 @@ export interface PreferenceHeatmapResponse {
   message?: string;
 }
 
-/** 偏好热力图请求超时：后端可能较慢或冷启动，GPT-4o 等模型下用户常先打开此弹窗，适当延长避免误报超时 */
-const HEATMAP_REQUEST_TIMEOUT_MS = 45000;
+/** 偏好数据请求超时：后端可能较慢或冷启动，用户打开弹窗时适当延长避免误报超时 */
+const PREFERENCE_REQUEST_TIMEOUT_MS = 45000;
 
 /**
- * 获取用户偏好热力图数据（带超时，避免一直加载）
+ * 获取用户偏好数据（用于 treemap 展示，带超时避免一直加载）
  */
 export const getPreferenceHeatmap = async (
   request: PreferenceHeatmapRequest
 ): Promise<PreferenceHeatmapData | null> => {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), HEATMAP_REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), PREFERENCE_REQUEST_TIMEOUT_MS);
   try {
-    console.log('🔍 请求偏好热力图:', request);
+    console.log('🔍 请求偏好数据（treemap）:', request);
     const response = await fetch(`${API_BASE_URL}/api/preferences/heatmap`, {
       method: 'POST',
       headers: {
@@ -77,11 +77,11 @@ export const getPreferenceHeatmap = async (
           themes: data.themes || [],
         };
       } else {
-        const reason = `热力图结构异常，缺少 genres/instruments/moods/themes 数组: ${JSON.stringify(data)}`;
+        const reason = `偏好数据结构异常，缺少 genres/instruments/moods/themes 数组: ${JSON.stringify(data)}`;
         console.warn('⚠️ [treemap]', reason);
         throw new Error(reason);
       }
-      console.log('🔍 热力图数据详情:', {
+      console.log('🔍 偏好数据详情:', {
         genres: heatmap.genres.length,
         instruments: heatmap.instruments.length,
         moods: heatmap.moods.length,
@@ -97,7 +97,7 @@ export const getPreferenceHeatmap = async (
   } catch (error: any) {
     clearTimeout(timeoutId);
     if (error?.name === 'AbortError') {
-      const reason = `请求超时(${HEATMAP_REQUEST_TIMEOUT_MS}ms)，请确认后端已启动且地址正确: ${API_BASE_URL}`;
+      const reason = `请求超时(${PREFERENCE_REQUEST_TIMEOUT_MS}ms)，请确认后端已启动且地址正确: ${API_BASE_URL}`;
       console.error('❌ [treemap]', reason);
       throw new Error(reason);
     }
@@ -108,4 +108,25 @@ export const getPreferenceHeatmap = async (
     console.error('❌ [treemap]', reason);
     throw new Error(reason);
   }
+};
+
+/**
+ * 记录「系统眼中的你」请求：请求时间、返回文字、treemap tag 与权重（后端写入 user_system_eyes_log）
+ */
+export const logSystemEyesRequest = async (params: {
+  username: string;
+  system_type?: 'A' | 'B';
+  explanation_text: string;
+  treemap_data: PreferenceHeatmapData;
+}): Promise<void> => {
+  await fetch(`${API_BASE_URL}/api/system-eyes/log`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: params.username,
+      system_type: params.system_type ?? 'A',
+      explanation_text: params.explanation_text,
+      treemap_data: params.treemap_data,
+    }),
+  });
 };

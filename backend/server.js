@@ -1,7 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import initSqlJs from 'sql.js';
-import { readFileSync, writeFileSync, appendFileSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -11,7 +11,7 @@ function debugLog(payload) {
     appendFileSync(DEBUG_LOG_PATH, JSON.stringify({ ...payload, timestamp: Date.now() }) + '\n');
   } catch (_) {}
 }
-import { generateRecommendations, getTrackTagsMap, getTrackRecommendationReason, getTrackRecommendationReasonFromTags, getCombinedPreferences, getTrackTagsByAnyId } from './recommender.js';
+import { generateRecommendations, getTrackTagsMap, getTrackRecommendationReason, getTrackRecommendationReasonFromTags, getCombinedPreferences, getTrackTagsByAnyId, loadTrackTagsAsync } from './recommender.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -72,6 +72,26 @@ const dbPath = join(__dirname, 'users.db');
 
 // 初始用户（与 init-db.js 一致），用于新建库插入、已有库补全缺失用户
 const INITIAL_USERS = [
+  { username: 'user1', password: '12' },
+  { username: 'user2', password: '24' },
+  { username: 'user3', password: '36' },
+  { username: 'user4', password: '48' },
+  { username: 'user5', password: '510' },
+  { username: 'user6', password: '612' },
+  { username: 'user7', password: '714' },
+  { username: 'user8', password: '816' },
+  { username: 'user9', password: '918' },
+  { username: 'user10', password: '1020' },
+  { username: 'user1_LLM', password: '12' },
+  { username: 'user2_LLM', password: '24' },
+  { username: 'user3_LLM', password: '36' },
+  { username: 'user4_LLM', password: '48' },
+  { username: 'user5_LLM', password: '510' },
+  { username: 'user6_LLM', password: '612' },
+  { username: 'user7_LLM', password: '714' },
+  { username: 'user8_LLM', password: '816' },
+  { username: 'user9_LLM', password: '918' },
+  { username: 'user10_LLM', password: '1020' },
   { username: 'user11', password: '1122' },
   { username: 'user11_LLM', password: '1122' },
   { username: 'user12', password: '1224' },
@@ -220,6 +240,56 @@ async function loadDatabase() {
         updated_at_timestamp INTEGER DEFAULT (strftime('%s', 'now'))
       )
     `);
+    // 系统眼中的你：每次用户请求时的请求时间、返回文字、treemap tag 与权重
+    db.run(`
+      CREATE TABLE IF NOT EXISTS user_system_eyes_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        system_type TEXT NOT NULL DEFAULT 'A',
+        requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        requested_at_timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+        explanation_text TEXT,
+        treemap_data TEXT
+      )
+    `);
+    // 气泡展示记录：展示时间、气泡类型、是否被点击、当时气泡内容
+    db.run(`
+      CREATE TABLE IF NOT EXISTS bubble_display_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        shown_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        shown_at_timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+        bubble_type TEXT NOT NULL,
+        was_clicked INTEGER NOT NULL DEFAULT 0,
+        content TEXT
+      )
+    `);
+    // 对话框按钮记录：展示的按钮（文字）、是否被点击、点击后的下一个文字
+    db.run(`
+      CREATE TABLE IF NOT EXISTS dialog_button_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        message_sequence_no INTEGER NOT NULL,
+        shown_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        shown_at_timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+        buttons_json TEXT NOT NULL,
+        clicked_button_label TEXT,
+        clicked_button_action TEXT,
+        next_text_after_click TEXT
+      )
+    `);
+    db.run(`
+      CREATE TABLE IF NOT EXISTS why_this_track_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at DATETIME DEFAULT (datetime('now', '+8 hours')),
+        created_at_timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+        username TEXT NOT NULL,
+        track_id TEXT,
+        track_name TEXT,
+        explanation TEXT NOT NULL
+      )
+    `);
     // 已有库：补全缺失的初始用户（user4–user10），不覆盖已有数据
     ensureInitialUsers();
     ensureSystemTypeMigration();
@@ -320,6 +390,53 @@ async function loadDatabase() {
         track_ids TEXT NOT NULL DEFAULT '[]',
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at_timestamp INTEGER DEFAULT (strftime('%s', 'now'))
+      )
+    `);
+    db.run(`
+      CREATE TABLE IF NOT EXISTS user_system_eyes_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        system_type TEXT NOT NULL DEFAULT 'A',
+        requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        requested_at_timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+        explanation_text TEXT,
+        treemap_data TEXT
+      )
+    `);
+    db.run(`
+      CREATE TABLE IF NOT EXISTS bubble_display_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        shown_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        shown_at_timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+        bubble_type TEXT NOT NULL,
+        was_clicked INTEGER NOT NULL DEFAULT 0,
+        content TEXT
+      )
+    `);
+    db.run(`
+      CREATE TABLE IF NOT EXISTS dialog_button_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        message_sequence_no INTEGER NOT NULL,
+        shown_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        shown_at_timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+        buttons_json TEXT NOT NULL,
+        clicked_button_label TEXT,
+        clicked_button_action TEXT,
+        next_text_after_click TEXT
+      )
+    `);
+    db.run(`
+      CREATE TABLE IF NOT EXISTS why_this_track_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at DATETIME DEFAULT (datetime('now', '+8 hours')),
+        created_at_timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+        username TEXT NOT NULL,
+        track_id TEXT,
+        track_name TEXT,
+        explanation TEXT NOT NULL
       )
     `);
 
@@ -434,9 +551,13 @@ function ensureTimestampColumns() {
   // user_conversations
   run(`ALTER TABLE user_conversations ADD COLUMN created_at_timestamp INTEGER`);
   run(`UPDATE user_conversations SET created_at_timestamp = strftime('%s', created_at) WHERE created_at_timestamp IS NULL AND created_at IS NOT NULL`);
+  run(`ALTER TABLE user_conversations ADD COLUMN message_buttons TEXT`);
+  run(`ALTER TABLE user_conversations ADD COLUMN user_button_choice TEXT`);
   // user_conversations_history
   run(`ALTER TABLE user_conversations_history ADD COLUMN created_at_timestamp INTEGER`);
   run(`UPDATE user_conversations_history SET created_at_timestamp = strftime('%s', created_at) WHERE created_at_timestamp IS NULL AND created_at IS NOT NULL`);
+  run(`ALTER TABLE user_conversations_history ADD COLUMN message_buttons TEXT`);
+  run(`ALTER TABLE user_conversations_history ADD COLUMN user_button_choice TEXT`);
   saveDatabase();
 }
 
@@ -452,8 +573,12 @@ function saveDatabase() {
   }
 }
 
-// 初始化数据库连接，完成后再启动服务
+// 初始化数据库 → 异步加载推荐 TSV（避免首请求卡死）→ 再启动 HTTP
 loadDatabase()
+  .then(() => {
+    console.log('正在加载推荐数据（raw.tsv）...');
+    return loadTrackTagsAsync();
+  })
   .then(() => {
     const HOST = process.env.HOST || '0.0.0.0';
     app.listen(PORT, HOST, () => {
@@ -463,7 +588,7 @@ loadDatabase()
     });
   })
   .catch((err) => {
-    console.error('数据库加载失败:', err);
+    console.error('启动失败:', err);
     process.exit(1);
   });
 
@@ -606,6 +731,149 @@ app.post('/api/behavior/log', (req, res) => {
   } catch (error) {
     console.error('记录行为失败:', error);
     res.status(500).json({ success: false, message: '记录行为失败: ' + error.message });
+  }
+});
+
+// 气泡展示记录：插入一条展示记录，返回 log_id 供后续点击时更新
+app.post('/api/bubble/log', (req, res) => {
+  const { username, bubble_type: bubbleType, content } = req.body;
+  if (!username || !bubbleType) {
+    return res.status(400).json({ success: false, message: 'username、bubble_type 不能为空' });
+  }
+  if (!db) {
+    return res.status(503).json({ success: false, message: '数据库未就绪' });
+  }
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO bubble_display_log (username, shown_at, shown_at_timestamp, bubble_type, was_clicked, content)
+      VALUES (?, ${DB_NOW}, ${DB_UNIX}, ?, 0, ?)
+    `);
+    stmt.run([username, bubbleType, content ?? '']);
+    const logId = db.exec('SELECT last_insert_rowid()')[0]?.values[0]?.[0];
+    stmt.free();
+    saveDatabase();
+    res.json({ success: true, log_id: logId });
+  } catch (error) {
+    console.error('气泡展示记录失败:', error);
+    res.status(500).json({ success: false, message: '记录失败: ' + error.message });
+  }
+});
+
+// 气泡点击：将指定 log_id 的 was_clicked 置为 1
+app.post('/api/bubble/click', (req, res) => {
+  const { log_id: logId } = req.body;
+  if (logId == null) {
+    return res.status(400).json({ success: false, message: 'log_id 不能为空' });
+  }
+  if (!db) {
+    return res.status(503).json({ success: false, message: '数据库未就绪' });
+  }
+  try {
+    const stmt = db.prepare('UPDATE bubble_display_log SET was_clicked = 1 WHERE id = ?');
+    stmt.run([logId]);
+    stmt.free();
+    saveDatabase();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('气泡点击记录失败:', error);
+    res.status(500).json({ success: false, message: '更新失败: ' + error.message });
+  }
+});
+
+// 对话框按钮展示记录：插入一条「展示给用户的按钮」记录，返回 log_id
+app.post('/api/dialog-button/log', (req, res) => {
+  const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+  const session_id = typeof req.body?.session_id === 'string' ? req.body.session_id.trim() : '';
+  const message_sequence_no = typeof req.body?.message_sequence_no === 'number' ? req.body.message_sequence_no : -1;
+  const buttons = req.body?.buttons;
+  if (!username || !session_id || message_sequence_no < 0 || !Array.isArray(buttons)) {
+    return res.status(400).json({ success: false, message: 'username、session_id、message_sequence_no、buttons 必填且 buttons 为数组' });
+  }
+  if (!db) {
+    return res.status(503).json({ success: false, message: '数据库未就绪' });
+  }
+  try {
+    const buttonsJson = JSON.stringify(buttons);
+    const stmt = db.prepare(`
+      INSERT INTO dialog_button_log (username, session_id, message_sequence_no, shown_at, shown_at_timestamp, buttons_json)
+      VALUES (?, ?, ?, ${DB_NOW}, ${DB_UNIX}, ?)
+    `);
+    stmt.run([username, session_id, message_sequence_no, buttonsJson]);
+    const logId = db.exec('SELECT last_insert_rowid()')[0]?.values[0]?.[0];
+    stmt.free();
+    saveDatabase();
+    res.json({ success: true, log_id: logId });
+  } catch (error) {
+    console.error('对话框按钮展示记录失败:', error);
+    res.status(500).json({ success: false, message: '记录失败: ' + error.message });
+  }
+});
+
+// 对话框按钮点击：记录被点击的按钮文字与 action，可选传 next_text（点击后展示的下一个文字）
+app.post('/api/dialog-button/click', (req, res) => {
+  const { log_id: logId, clicked_label: clickedLabel, clicked_action: clickedAction, next_text: nextText } = req.body;
+  if (logId == null) {
+    return res.status(400).json({ success: false, message: 'log_id 不能为空' });
+  }
+  if (!db) {
+    return res.status(503).json({ success: false, message: '数据库未就绪' });
+  }
+  try {
+    const stmt = db.prepare(`
+      UPDATE dialog_button_log SET clicked_button_label = ?, clicked_button_action = ?, next_text_after_click = COALESCE(?, next_text_after_click) WHERE id = ?
+    `);
+    stmt.run([clickedLabel ?? '', clickedAction ?? '', nextText ?? null, logId]);
+    stmt.free();
+    saveDatabase();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('对话框按钮点击记录失败:', error);
+    res.status(500).json({ success: false, message: '更新失败: ' + error.message });
+  }
+});
+
+// 对话框按钮：更新「点击之后的下一个文字」（若点击时未传，可后续补传）
+app.post('/api/dialog-button/next-text', (req, res) => {
+  const { log_id: logId, next_text: nextText } = req.body;
+  if (logId == null) {
+    return res.status(400).json({ success: false, message: 'log_id 不能为空' });
+  }
+  if (!db) {
+    return res.status(503).json({ success: false, message: '数据库未就绪' });
+  }
+  try {
+    const stmt = db.prepare('UPDATE dialog_button_log SET next_text_after_click = ? WHERE id = ?');
+    stmt.run([nextText ?? '', logId]);
+    stmt.free();
+    saveDatabase();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('对话框按钮 next_text 更新失败:', error);
+    res.status(500).json({ success: false, message: '更新失败: ' + error.message });
+  }
+});
+
+// 「为什么推荐这首」按钮：记录点击时间、用户名、系统返回的解释消息
+app.post('/api/log/why-this-track', (req, res) => {
+  const { username, track_id: trackId, track_name: trackName, explanation } = req.body;
+  if (!username || explanation == null || explanation === '') {
+    return res.status(400).json({ success: false, message: 'username 和 explanation 不能为空' });
+  }
+  if (!db) {
+    return res.status(503).json({ success: false, message: '数据库未就绪' });
+  }
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO why_this_track_log (username, track_id, track_name, explanation)
+      VALUES (?, ?, ?, ?)
+    `);
+    stmt.run([username, trackId ?? null, trackName ?? null, String(explanation)]);
+    stmt.free();
+    saveDatabase();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('为什么推荐这首 记录失败:', error);
+    res.status(500).json({ success: false, message: '记录失败: ' + error.message });
   }
 });
 
@@ -802,26 +1070,30 @@ app.post('/api/preferences/clear', (req, res) => {
 });
 
 // 追加一条对话：同时写入 user_conversations（当前会话）和 user_conversations_history（永久保留，永不删除）
+// body 可选 message_buttons: [{label, action}]（该条消息附带的操作按钮）、user_button_choice: 暂由 record-button-choice 写入
 app.post('/api/conversation/append', (req, res) => {
   const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
   const session_id = typeof req.body?.session_id === 'string' ? req.body.session_id.trim() : '';
   const sender = typeof req.body?.sender === 'string' ? req.body.sender.trim() : '';
   const content = typeof req.body?.content === 'string' ? req.body.content : String(req.body?.content ?? '');
   const sequence_no = typeof req.body?.sequence_no === 'number' ? req.body.sequence_no : 0;
+  const message_buttons = req.body?.message_buttons != null
+    ? (typeof req.body.message_buttons === 'string' ? req.body.message_buttons : JSON.stringify(req.body.message_buttons))
+    : null;
   if (!username || !session_id || !sender) {
     return res.status(400).json({ success: false, message: 'username、session_id、sender 不能为空' });
   }
   try {
     const insertConv = db.prepare(`
-      INSERT INTO user_conversations (username, session_id, sender, content, sequence_no, created_at, created_at_timestamp)
-      VALUES (?, ?, ?, ?, ?, ${DB_NOW}, ${DB_UNIX})
+      INSERT INTO user_conversations (username, session_id, sender, content, sequence_no, message_buttons, created_at, created_at_timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ${DB_NOW}, ${DB_UNIX})
     `);
     const insertHist = db.prepare(`
-      INSERT INTO user_conversations_history (username, session_id, sender, content, sequence_no, created_at, created_at_timestamp)
-      VALUES (?, ?, ?, ?, ?, ${DB_NOW}, ${DB_UNIX})
+      INSERT INTO user_conversations_history (username, session_id, sender, content, sequence_no, message_buttons, created_at, created_at_timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ${DB_NOW}, ${DB_UNIX})
     `);
-    insertConv.run([username, session_id, sender, content, sequence_no]);
-    insertHist.run([username, session_id, sender, content, sequence_no]);
+    insertConv.run([username, session_id, sender, content, sequence_no, message_buttons]);
+    insertHist.run([username, session_id, sender, content, sequence_no, message_buttons]);
     insertConv.free();
     insertHist.free();
     saveDatabase();
@@ -829,6 +1101,36 @@ app.post('/api/conversation/append', (req, res) => {
   } catch (error) {
     console.error('追加对话失败:', error);
     res.status(500).json({ success: false, message: '追加对话失败: ' + error.message });
+  }
+});
+
+// 记录用户对某条助手消息的操作按钮选择（更新该条的 user_button_choice）
+app.post('/api/conversation/record-button-choice', (req, res) => {
+  const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+  const session_id = typeof req.body?.session_id === 'string' ? req.body.session_id.trim() : '';
+  const sequence_no = typeof req.body?.sequence_no === 'number' ? req.body.sequence_no : -1;
+  const choice_label = typeof req.body?.choice_label === 'string' ? req.body.choice_label.trim() : '';
+  const choice_action = typeof req.body?.choice_action === 'string' ? req.body.choice_action.trim() : '';
+  if (!username || !session_id || sequence_no < 0) {
+    return res.status(400).json({ success: false, message: 'username、session_id、sequence_no 不能为空且 sequence_no 需为非负' });
+  }
+  const user_button_choice = JSON.stringify({ label: choice_label, action: choice_action });
+  try {
+    const updateConv = db.prepare(`
+      UPDATE user_conversations SET user_button_choice = ? WHERE username = ? AND session_id = ? AND sequence_no = ? AND sender = 'assistant'
+    `);
+    const updateHist = db.prepare(`
+      UPDATE user_conversations_history SET user_button_choice = ? WHERE username = ? AND session_id = ? AND sequence_no = ? AND sender = 'assistant'
+    `);
+    const rc = updateConv.run([user_button_choice, username, session_id, sequence_no]);
+    updateHist.run([user_button_choice, username, session_id, sequence_no]);
+    updateConv.free();
+    updateHist.free();
+    saveDatabase();
+    res.json({ success: true, message: '已记录用户操作', updated: rc.changes > 0 });
+  } catch (error) {
+    console.error('记录按钮选择失败:', error);
+    res.status(500).json({ success: false, message: '记录按钮选择失败: ' + error.message });
   }
 });
 
@@ -1131,19 +1433,26 @@ function getRecommendationsForPlaylist(username, count, extraExcludedIds = [], s
   );
 }
 
+// 单曲详情请求超时（毫秒），避免 Jamendo 慢时阻塞整次推荐
+const FULL_TRACK_DETAILS_TIMEOUT_MS = 10000;
+
 // 获取歌曲完整详情（供推荐接口返回首曲，减少前端再请求 Jamendo 的耗时）
 async function getFullTrackDetails(trackId) {
   const trackTagsMap = getTrackTagsMap();
   const tags = trackTagsMap.get(trackId) || { genres: [], instruments: [], moods: [], themes: [] };
+  const numericId = (trackId || '').replace(/^track_0*/, '') || '0';
+  const url = `https://api.jamendo.com/v3.0/tracks/?client_id=1ccf1f44&id=${numericId}&format=json`;
   try {
-    const numericId = (trackId || '').replace('track_', '').replace(/^0+/, '') || '0';
     const fetch = (await import('node-fetch')).default;
-    const response = await fetch(`https://api.jamendo.com/v3.0/tracks/?client_id=1ccf1f44&id=${numericId}&format=json`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FULL_TRACK_DETAILS_TIMEOUT_MS);
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
     const data = await response.json();
     if (data.results && data.results.length > 0) {
       const t = data.results[0];
       return {
-        id: (t.id ?? trackId).toString(),
+        id: trackId, // 与 recommendedTracks 格式一致，便于前端匹配
         name: t.name || 'Unknown',
         artist_name: t.artist_name || 'Unknown Artist',
         album_name: t.album_name || 'Unknown Album',
@@ -1155,7 +1464,11 @@ async function getFullTrackDetails(trackId) {
       };
     }
   } catch (err) {
-    console.warn(`getFullTrackDetails(${trackId}) 失败:`, err.message);
+    if (err.name === 'AbortError') {
+      console.warn(`getFullTrackDetails(${trackId}) 超时 ${FULL_TRACK_DETAILS_TIMEOUT_MS}ms`);
+    } else {
+      console.warn(`getFullTrackDetails(${trackId}) 失败:`, err.message);
+    }
   }
   return null;
 }
@@ -1310,14 +1623,22 @@ const PREFERENCE_UPDATE_REASON_LABELS = {
 
 // 推荐歌曲接口（按系统 A/B 维度，推荐算法一致）
 app.post('/api/recommend', async (req, res) => {
-  const { username, systemType: reqSystemType, currentTrackId, explicitPreferences, count = 3, trigger, excludedTags, current_playlist: currentPlaylist, preferenceUpdateReason } = req.body;
+  const { username, systemType: reqSystemType, currentTrackId, explicitPreferences, count = 3, trigger, excludedTags, current_playlist: currentPlaylist, preferenceUpdateReason, triggerUserMessage } = req.body;
   const systemType = reqSystemType === 'B' ? 'B' : 'A';
 
   if (!username) {
     return res.status(400).json({ success: false, message: '用户名不能为空' });
   }
 
+  const RECOMMEND_TIMEOUT_MS = 30000;
+  const timeoutId = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(503).json({ success: false, message: '推荐请求超时，请稍后重试' });
+    }
+  }, RECOMMEND_TIMEOUT_MS);
+
   const recommendStartMs = Date.now();
+  console.log('[recommend] 开始', recommendStartMs);
   try {
     const hasExplicit = explicitPreferences && (
       (explicitPreferences.genres?.length > 0) || (explicitPreferences.instruments?.length > 0) ||
@@ -1351,7 +1672,16 @@ app.post('/api/recommend', async (req, res) => {
       console.error('读取数据库偏好失败:', error);
     }
 
-    const finalPrefs = isColdStart
+    // 用户主动表达喜好插播 3 首：只按本次表达的标签推荐，不融合 DB 已有偏好
+    const useOnlyExpressed = trigger === 'user_expressed_preference' && hasExplicit;
+    const finalPrefs = useOnlyExpressed
+      ? {
+          genres: explicitPreferences.genres || [],
+          instruments: explicitPreferences.instruments || [],
+          moods: explicitPreferences.moods || [],
+          themes: explicitPreferences.themes || []
+        }
+      : isColdStart
       ? {
           genres: explicitPreferences.genres || [],
           instruments: explicitPreferences.instruments || [],
@@ -1364,12 +1694,15 @@ app.post('/api/recommend', async (req, res) => {
           moods: [...new Set([...dbPreferences.moods, ...(explicitPreferences?.moods || [])])],
           themes: [...new Set([...dbPreferences.themes, ...(explicitPreferences?.themes || [])])]
         };
-    
+
     // 输出日志到终端（当前歌曲信息改为后台获取，不阻塞响应）
     let triggerLabel = TRIGGER_LABELS[trigger] || trigger || '未指定';
     if (trigger === 'preferences_updated' && preferenceUpdateReason) {
       const reasonLabel = PREFERENCE_UPDATE_REASON_LABELS[preferenceUpdateReason] || preferenceUpdateReason;
       triggerLabel = `用户偏好已更新（原因：${reasonLabel}）`;
+    }
+    if (trigger === 'user_expressed_preference' && triggerUserMessage) {
+      triggerLabel = triggerLabel + '；用户消息原文：「' + triggerUserMessage + '」';
     }
     console.log('\n' + '='.repeat(60));
     console.log('🎵 推荐请求');
@@ -1455,14 +1788,18 @@ app.post('/api/recommend', async (req, res) => {
     console.log(`🎯 请求推荐数量: ${count}`);
     
     // 生成推荐（用户明确不喜欢时传入 excludedTags；历史已推荐过的曲目不再推荐）
+    console.log('[recommend] 即将调用 generateRecommendations', Date.now());
+    const useOnlyExplicitPrefs = trigger === 'user_expressed_preference';
     const { trackIds: recommendedTracks, scores: recommendedScores } = generateRecommendations(
       finalPrefs,
       behaviorForRecommend,
       currentTrackId || '',
       count,
       excludedTags || {},
-      alreadyRecommendedIds
+      alreadyRecommendedIds,
+      useOnlyExplicitPrefs
     );
+    console.log('[recommend] generateRecommendations 返回', Date.now(), '耗时(ms)', Date.now() - recommendStartMs);
 
     // 不惜一切代价：打好分后立刻把 trackIds 返回给前端，待播列表立刻可用；写库和日志放到后台
     let filteredPlaylist = [];
@@ -1483,25 +1820,16 @@ app.post('/api/recommend', async (req, res) => {
     const durationMs = Date.now() - recommendStartMs;
     console.log(`⏱ 推荐请求耗时: ${durationMs}ms`);
 
-    // 冷启动/首曲播放：由后端拉取首曲（及前几首）详情并返回，避免前端再请求 Jamendo 失败导致「推荐不出歌曲」
-    let firstTrack = undefined;
-    let firstTracks = [];
-    if (recommendedTracks.length > 0) {
-      const toFetch = Math.min(recommendedTracks.length, 5);
-      const details = await Promise.all(
-        recommendedTracks.slice(0, toFetch).map((tid) => getFullTrackDetails(tid))
-      );
-      firstTracks = details.filter(Boolean);
-      firstTrack = firstTracks[0] || undefined;
-    }
-
+    // 立刻返回 trackIds，不等待 Jamendo 拉取首曲详情，避免后端被 Jamendo 拖死；前端用 getTrackById 按需拉首曲
+    clearTimeout(timeoutId);
+    console.log('[recommend] 即将 res.json，总耗时(ms)', Date.now() - recommendStartMs);
     res.json({
       success: true,
       recommendedTracks,
       recommendedScores: recommendedScores || recommendedTracks.map(() => 0),
       count: recommendedTracks.length,
-      firstTrack: firstTrack || undefined,
-      firstTracks: firstTracks,
+      firstTrack: undefined,
+      firstTracks: [],
       filteredPlaylist: filteredPlaylist.length > 0 ? filteredPlaylist : undefined
     });
 
@@ -1517,7 +1845,10 @@ app.post('/api/recommend', async (req, res) => {
       if (recommendedTracks.length > 0) {
         const trackInfoPromises = recommendedTracks.slice(0, 10).map(tid => getTrackInfo(tid));
         Promise.all(trackInfoPromises).then((trackInfos) => {
-          console.log(`   推荐歌曲:（本结果对应请求原因: ${triggerLabel}）`);
+          const resultReasonLabel = (trigger === 'user_expressed_preference' && triggerUserMessage)
+            ? `${triggerLabel}；用户消息原文：「${triggerUserMessage}」`
+            : triggerLabel;
+          console.log(`   推荐歌曲:（本结果对应请求原因: ${resultReasonLabel}）`);
           recommendedTracks.slice(0, 10).forEach((tid, index) => {
             const info = trackInfos[index];
             const cur = currentTrackId === tid ? ' ⭐当前播放' : '';
@@ -1530,8 +1861,11 @@ app.post('/api/recommend', async (req, res) => {
       console.log('===================================\n');
     });
   } catch (error) {
+    clearTimeout(timeoutId);
     console.error('❌ 推荐失败:', error);
-    res.status(500).json({ success: false, message: '推荐失败: ' + error.message });
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: '推荐失败: ' + error.message });
+    }
   }
 });
 
@@ -1713,7 +2047,7 @@ app.post('/api/recommend/diversity', async (req, res) => {
   }
 });
 
-// 偏好热力图接口（支持 system_type，与待播/推荐一致）
+// 偏好热力图接口：从 user_preferences 表读取 tags 与权重（支持 system_type）
 app.post('/api/preferences/heatmap', async (req, res) => {
   const { username, system_type: systemType } = req.body;
   if (!username) {
@@ -1722,115 +2056,50 @@ app.post('/api/preferences/heatmap', async (req, res) => {
   const systemTypeNorm = systemType === 'B' ? 'B' : 'A';
 
   try {
-    const behaviorHistory = getUserBehaviorHistory(username, systemTypeNorm);
-    const trackTagsMap = getTrackTagsMap();
-    
-    console.log(`📊 偏好热力图: 用户 ${username}, 记录数: ${behaviorHistory.length}`);
-    console.log(`📊 trackTagsMap 大小: ${trackTagsMap.size}`);
-    
-    // 初始化tag权重Map
-    const tagWeights = {
-      genres: new Map(),
-      instruments: new Map(),
-      moods: new Map(),
-      themes: new Map()
+    const stmt = db.prepare('SELECT genres, instruments, moods, themes, genres_weights, instruments_weights, moods_weights, themes_weights FROM user_preferences WHERE username = ? AND system_type = ?');
+    stmt.bind([username, systemTypeNorm]);
+    const row = stmt.step() ? stmt.getAsObject() : null;
+    stmt.free();
+
+    const parseJson = (val) => {
+      if (val == null) return null;
+      if (typeof val === 'string') {
+        try { return JSON.parse(val); } catch (e) { return null; }
+      }
+      return val;
     };
-    
-    let processedCount = 0;
-    let skippedNoTagsCount = 0;
-    let skippedZeroWeightCount = 0;
-    
-    // 遍历行为历史，计算每个tag的权重（行为表存 1419628，raw.tsv 存 track_1419628，需统一查找）
-    behaviorHistory.forEach(record => {
-      const trackTags = getTrackTagsByAnyId(trackTagsMap, record.track_id);
-      if (!trackTags) {
-        skippedNoTagsCount++;
-        return;
-      }
-      
-      // 计算该记录的权重贡献
-      let weight = 0;
-      
-      // 评分贡献：1-2星 = -2, 3星 = 0, 4-5星 = +2
-      if (record.rating) {
-        if (record.rating <= 2) {
-          weight -= 2;
-        } else if (record.rating >= 4) {
-          weight += 2;
-        }
-      }
-      
-      // 收藏贡献：+1
-      if (record.is_favorited) {
-        weight += 1;
-      }
-      
-      // 听歌时长贡献：>60秒 = +1, >120秒 = +2
-      if (record.listen_duration) {
-        if (record.listen_duration > 120) {
-          weight += 2;
-        } else if (record.listen_duration > 60) {
-          weight += 1;
-        }
-      }
-      
-      // 如果权重为0，跳过（不影响偏好）
-      if (weight === 0) {
-        skippedZeroWeightCount++;
-        return;
-      }
-      
-      processedCount++;
-      
-      // 将权重累加到对应的tag上
-      trackTags.genres?.forEach(tag => {
-        const current = tagWeights.genres.get(tag) || 0;
-        tagWeights.genres.set(tag, current + weight);
-      });
-      
-      trackTags.instruments?.forEach(tag => {
-        const current = tagWeights.instruments.get(tag) || 0;
-        tagWeights.instruments.set(tag, current + weight);
-      });
-      
-      trackTags.moods?.forEach(tag => {
-        const current = tagWeights.moods.get(tag) || 0;
-        tagWeights.moods.set(tag, current + weight);
-      });
-      
-      trackTags.themes?.forEach(tag => {
-        const current = tagWeights.themes.get(tag) || 0;
-        tagWeights.themes.set(tag, current + weight);
-      });
-    });
-    
-    console.log(`📊 处理统计: 已处理 ${processedCount} 条, 无标签跳过 ${skippedNoTagsCount} 条, 零权重跳过 ${skippedZeroWeightCount} 条`);
-    
-    // 格式化输出：转换为数组并按权重排序
-    const formatTagWeights = (map) => {
-      return Array.from(map.entries())
-        .sort((a, b) => b[1] - a[1]) // 按权重降序
-        .map(([tag, weight]) => ({ tag, weight }));
+
+    const tagsByCat = {
+      genres: row ? parseJson(row.genres) || [] : [],
+      instruments: row ? parseJson(row.instruments) || [] : [],
+      moods: row ? parseJson(row.moods) || [] : [],
+      themes: row ? parseJson(row.themes) || [] : []
     };
-    
+    const weightsByCat = {
+      genres: row ? parseJson(row.genres_weights) || {} : {},
+      instruments: row ? parseJson(row.instruments_weights) || {} : {},
+      moods: row ? parseJson(row.moods_weights) || {} : {},
+      themes: row ? parseJson(row.themes_weights) || {} : {}
+    };
+
+    // 按 user_preferences 的 tag 列表 + 权重构建 [{ tag, weight }]，按权重降序
+    const buildCategory = (cat) => {
+      const tags = Array.isArray(tagsByCat[cat]) ? tagsByCat[cat] : [];
+      const weights = weightsByCat[cat] && typeof weightsByCat[cat] === 'object' ? weightsByCat[cat] : {};
+      return tags
+        .map((tag) => ({ tag, weight: Number(weights[tag]) || 1 }))
+        .sort((a, b) => b.weight - a.weight);
+    };
+
     const result = {
-      genres: formatTagWeights(tagWeights.genres),
-      instruments: formatTagWeights(tagWeights.instruments),
-      moods: formatTagWeights(tagWeights.moods),
-      themes: formatTagWeights(tagWeights.themes)
+      genres: buildCategory('genres'),
+      instruments: buildCategory('instruments'),
+      moods: buildCategory('moods'),
+      themes: buildCategory('themes')
     };
-    
-    console.log(`📊 结果统计: genres=${result.genres.length}, instruments=${result.instruments.length}, moods=${result.moods.length}, themes=${result.themes.length}`);
-    
-    // 如果所有类别都为空，输出一些示例 track_id 用于调试
-    if (result.genres.length === 0 && result.instruments.length === 0 && 
-        result.moods.length === 0 && result.themes.length === 0 && behaviorHistory.length > 0) {
-      console.log(`⚠️  警告: 所有类别都为空，但用户有 ${behaviorHistory.length} 条记录`);
-      console.log(`   示例 track_id: ${behaviorHistory.slice(0, 3).map(r => r.track_id).join(', ')}`);
-      console.log(`   这些 track_id 是否在 trackTagsMap 中: ${behaviorHistory.slice(0, 3).map(r => !!getTrackTagsByAnyId(trackTagsMap, r.track_id)).join(', ')}`);
-    }
-    
-    // 先返回热力图，避免 DB 写入阻塞导致前端一直加载
+
+    console.log(`📊 偏好热力图(来自 user_preferences): 用户 ${username} 系统 ${systemTypeNorm}, genres=${result.genres.length}, instruments=${result.instruments.length}, moods=${result.moods.length}, themes=${result.themes.length}`);
+
     res.json({
       success: true,
       genres: result.genres,
@@ -1838,79 +2107,42 @@ app.post('/api/preferences/heatmap', async (req, res) => {
       moods: result.moods,
       themes: result.themes
     });
-
-    // 异步写入 user_preferences / user_preference_updates，不阻塞响应
-    const weightArraysToObject = (arr) => Object.fromEntries((arr || []).map(({ tag, weight }) => [tag, weight]));
-    const newWeights = {
-      genres: weightArraysToObject(result.genres),
-      instruments: weightArraysToObject(result.instruments),
-      moods: weightArraysToObject(result.moods),
-      themes: weightArraysToObject(result.themes)
-    };
-    const categories = ['genres', 'instruments', 'moods', 'themes'];
-    setImmediate(() => {
-      try {
-        const prefStmt = db.prepare('SELECT genres_weights, instruments_weights, moods_weights, themes_weights FROM user_preferences WHERE username = ? AND system_type = ?');
-        prefStmt.bind([username, systemTypeNorm]);
-        if (prefStmt.step()) {
-          const row = prefStmt.getAsObject();
-          prefStmt.free();
-          const oldWeights = {
-            genres: JSON.parse(row.genres_weights || '{}'),
-            instruments: JSON.parse(row.instruments_weights || '{}'),
-            moods: JSON.parse(row.moods_weights || '{}'),
-            themes: JSON.parse(row.themes_weights || '{}')
-          };
-          const insStmt = db.prepare(`
-            INSERT INTO user_preference_updates (username, system_type, tag_category, old_tags, new_tags, operation, updated_at, updated_at_timestamp)
-            VALUES (?, ?, ?, ?, ?, 'weight_update', ` + DB_NOW + `, ` + DB_UNIX + `)
-          `);
-          let anyChange = false;
-          for (let i = 0; i < categories.length; i++) {
-            const cat = categories[i];
-            const oldStr = JSON.stringify(oldWeights[cat]);
-            const newStr = JSON.stringify(newWeights[cat]);
-            if (oldStr !== newStr) {
-              anyChange = true;
-              insStmt.run([username, systemTypeNorm, cat, oldStr, newStr]);
-            }
-          }
-          insStmt.free();
-          if (anyChange) {
-            // Terminal 日志：用户偏好更新（权重），更新前 / 更新后
-            console.log('\n📝 ========== 用户偏好更新（权重） ==========');
-            console.log(`🕐 时间: ${getTimestamp()}`);
-            console.log(`👤 用户: ${username} (系统: ${systemTypeNorm}) | 操作: weight_update`);
-            console.log('📤 更新前(权重):', JSON.stringify(oldWeights));
-            console.log('📥 更新后(权重):', JSON.stringify(newWeights));
-            console.log('===================================\n');
-
-            const updateStmt = db.prepare(`
-              UPDATE user_preferences
-              SET genres_weights = ?, instruments_weights = ?, moods_weights = ?, themes_weights = ?, updated_at = ${DB_NOW}, updated_at_timestamp = ${DB_UNIX}
-              WHERE username = ? AND system_type = ?
-            `);
-            updateStmt.run([
-              JSON.stringify(newWeights.genres),
-              JSON.stringify(newWeights.instruments),
-              JSON.stringify(newWeights.moods),
-              JSON.stringify(newWeights.themes),
-              username,
-              systemTypeNorm
-            ]);
-            updateStmt.free();
-          }
-        } else {
-          prefStmt.free();
-        }
-      } catch (e) {
-        console.error('❌ 热力图权重异步写入失败:', e);
-      }
-    });
   } catch (error) {
     console.error('❌ 获取偏好热力图失败:', error);
     res.status(500).json({ success: false, message: '获取偏好热力图失败: ' + error.message });
   }
 });
+
+// 记录「系统眼中的你」请求：请求时间、返回文字、treemap tag 与权重
+app.post('/api/system-eyes/log', (req, res) => {
+  const { username, system_type: systemType, explanation_text: explanationText, treemap_data: treemapData } = req.body;
+  if (!username) {
+    return res.status(400).json({ success: false, message: '用户名不能为空' });
+  }
+  const systemTypeNorm = systemType === 'B' ? 'B' : 'A';
+  try {
+    const treemapJson = typeof treemapData === 'string' ? treemapData : JSON.stringify(treemapData ?? {});
+    const stmt = db.prepare(`
+      INSERT INTO user_system_eyes_log (username, system_type, requested_at, requested_at_timestamp, explanation_text, treemap_data)
+      VALUES (?, ?, ${DB_NOW}, ${DB_UNIX}, ?, ?)
+    `);
+    stmt.run([username, systemTypeNorm, explanationText ?? '', treemapJson]);
+    stmt.free();
+    saveDatabase();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ 记录系统眼中的你失败:', error);
+    res.status(500).json({ success: false, message: '记录失败: ' + error.message });
+  }
+});
+
+// 生产部署：若有 public 目录则托管前端静态文件并 SPA 回退（前端 build 产物放入 backend/public）
+const publicPath = join(__dirname, 'public');
+if (existsSync(publicPath)) {
+  app.use(express.static(publicPath));
+  app.get('*', (req, res) => {
+    res.sendFile(join(publicPath, 'index.html'), (err) => { if (err) res.status(500).send('Not found'); });
+  });
+}
 
 // 服务器在 loadDatabase().then() 中启动

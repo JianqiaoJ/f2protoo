@@ -2,7 +2,7 @@
  * 待播列表：后台维护，按顺序播放，倒数第二首时自动追加 3 首，排除已听过
  */
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:3000';
+import { API_BASE_URL } from './baseUrl';
 
 /**
  * 获取待播列表。若当前在倒数第二首，后台会追加 3 首并返回新列表；若列表已播完会重新生成。

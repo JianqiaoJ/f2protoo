@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import { validateUser } from '../data/users';
-import { clearUserData } from '../utils/storage';
+import { clearUserData, setSerenLLMProvider, getDefaultSerenLLMProvider } from '../utils/storage';
 import { usePlayerStore } from '../store';
 
 interface LoginProps {
@@ -49,7 +49,9 @@ export default function Login({ onLoginSuccess }: LoginProps) {
       }
       localStorage.setItem('isLoggedIn', 'true');
       localStorage.setItem('currentUser', username.trim());
-      usePlayerStore.getState().setCurrentSystem(username.trim().includes('LLM') ? 'B' : 'A');
+      const system = username.trim().includes('LLM') ? 'B' : 'A';
+      usePlayerStore.getState().setCurrentSystem(system);
+      setSerenLLMProvider(getDefaultSerenLLMProvider(system));
       try {
         usePlayerStore.getState().hydrateFromStorage();
       } catch (e) {

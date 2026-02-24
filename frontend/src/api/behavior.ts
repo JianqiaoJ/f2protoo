@@ -1,6 +1,6 @@
 // 用户听歌行为记录API
 
-const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:3000';
+import { API_BASE_URL } from './baseUrl';
 
 export interface ListeningBehavior {
   username: string;

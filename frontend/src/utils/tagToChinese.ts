@@ -298,10 +298,15 @@ const TAG_ZH: Record<string, string> = {
   synthesizer: '合成器',
   organ: '管风琴',
   trumpet: '小号',
+  trombone: '长号',
   saxophone: '萨克斯',
   flute: '长笛',
+  oboe: '双簧管',
   harp: '竖琴',
+  horn: '圆号',
   harmonica: '口琴',
+  keyboard: '键盘',
+  drummachine: '鼓机',
   percussion: '打击乐',
   strings: '弦乐',
   brass: '铜管',
@@ -452,4 +457,42 @@ export function tagWithChinese(tag: string): string {
   if (!tag || typeof tag !== 'string') return tag;
   const zh = tagToChinese(tag);
   return zh !== tag ? `${tag} ${zh}` : tag;
+}
+
+let cachedTagDisplayStrings: string[] | null = null;
+/** 所有「英文 中文」标签展示串，用于在气泡/对话中把标签部分加粗；按长度降序以便优先匹配长串 */
+export function getAllTagDisplayStrings(): string[] {
+  if (cachedTagDisplayStrings) return cachedTagDisplayStrings;
+  cachedTagDisplayStrings = Object.keys(TAG_ZH)
+    .map((tag) => tagWithChinese(tag))
+    .filter((s) => s.includes(' '))
+    .sort((a, b) => b.length - a.length);
+  return cachedTagDisplayStrings;
+}
+
+export type TagDisplaySegment = { type: 'plain'; text: string } | { type: 'tag'; text: string };
+/** 将文案按「标签展示串」拆成段落，便于渲染时对 type===tag 的段落加粗 */
+export function splitTextByTagDisplay(text: string): TagDisplaySegment[] {
+  if (!text) return [];
+  const tagDisplays = getAllTagDisplayStrings();
+  const parts: TagDisplaySegment[] = [];
+  let remaining = text;
+  while (remaining.length > 0) {
+    let found = false;
+    for (const tag of tagDisplays) {
+      const idx = remaining.indexOf(tag);
+      if (idx >= 0) {
+        if (idx > 0) parts.push({ type: 'plain', text: remaining.slice(0, idx) });
+        parts.push({ type: 'tag', text: tag });
+        remaining = remaining.slice(idx + tag.length);
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      parts.push({ type: 'plain', text: remaining });
+      break;
+    }
+  }
+  return parts;
 }
